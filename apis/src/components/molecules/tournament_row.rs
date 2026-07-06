@@ -43,6 +43,23 @@ pub fn TournamentRow(tournament: TournamentAbstractResponse) -> impl IntoView {
     };
     let total_games = tournament.games_total;
     let finished_games = Signal::derive(move || tournament.games_played);
+    let mode_label = move || {
+        tournament
+            .mode
+            .parse::<TournamentMode>()
+            .map(|mode| match mode {
+                TournamentMode::RoundRobin => {
+                    let pairs = tournament.round_robin_pairs;
+                    if pairs == 1 {
+                        String::from("Round robin (1 pair)")
+                    } else {
+                        format!("Round robin ({pairs} pairs)")
+                    }
+                }
+                _ => mode.pretty_string(),
+            })
+            .unwrap_or_default()
+    };
     view! {
         <article class="flex relative flex-col gap-3 p-4 w-full ui-card-row">
             <div class="w-full text-lg font-bold text-gray-900 break-words dark:text-gray-100">
@@ -51,13 +68,7 @@ pub fn TournamentRow(tournament: TournamentAbstractResponse) -> impl IntoView {
             <div class="grid gap-3 text-sm text-gray-700 sm:grid-cols-2 dark:text-gray-300">
                 <div class="flex flex-col gap-1">
                     <div class="flex gap-1">
-                        <div>
-                            {tournament
-                                .mode
-                                .parse::<TournamentMode>()
-                                .map(|m| m.pretty_string())
-                                .unwrap_or_default()}
-                        </div>
+                        <div>{mode_label}</div>
                     </div>
                     <TimeRow time_info />
                     <div>{seats_taken}</div>
