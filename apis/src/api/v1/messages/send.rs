@@ -232,6 +232,51 @@ pub async fn send_challenge_creation_message(
     Ok(())
 }
 
+pub async fn send_challenge_removed_message(
+    hub: Data<Arc<WsHub>>,
+    challenge_response: ChallengeResponse,
+) -> Result<()> {
+    let mut messages = Vec::new();
+
+    match challenge_response.visibility {
+        ChallengeVisibility::Public => {
+            messages.push(InternalServerMessage {
+                destination: MessageDestination::Global,
+                message: ServerMessage::Challenge(ChallengeUpdate::Removed(
+                    challenge_response.challenge_id,
+                )),
+            });
+        }
+        ChallengeVisibility::Private => {
+            messages.push(InternalServerMessage {
+                destination: MessageDestination::User(challenge_response.challenger.uid),
+                message: ServerMessage::Challenge(ChallengeUpdate::Removed(
+                    challenge_response.challenge_id,
+                )),
+            });
+        }
+        ChallengeVisibility::Direct => {
+            if let Some(opponent) = challenge_response.opponent {
+                messages.push(InternalServerMessage {
+                    destination: MessageDestination::User(opponent.uid),
+                    message: ServerMessage::Challenge(ChallengeUpdate::Removed(
+                        challenge_response.challenge_id.clone(),
+                    )),
+                });
+                messages.push(InternalServerMessage {
+                    destination: MessageDestination::User(challenge_response.challenger.uid),
+                    message: ServerMessage::Challenge(ChallengeUpdate::Removed(
+                        challenge_response.challenge_id,
+                    )),
+                });
+            }
+        }
+    }
+
+    send_messages_batch(hub.as_ref(), messages).await;
+    Ok(())
+}
+
 pub async fn send_control_messages(
     hub: Data<Arc<WsHub>>,
     game: &Game,
