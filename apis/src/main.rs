@@ -14,7 +14,7 @@ use apis::websocket::{self, WebsocketData};
 #[actix_web::main]
 async fn main() -> std::io::Result<()> {
     use websocket::{start_connection, WsHub};
-    use api::v1::bot::{games::{api_get_game, api_get_ongoing_games, api_get_pending_games}, play::{api_control, api_play}, challenges::{api_accept_challenge, api_create_challenge, api_get_challenges}};
+    use api::v1::bot::{games::{api_get_game, api_get_ongoing_games, api_get_pending_games}, play::{api_control, api_play}, challenges::{api_accept_challenge, api_create_challenge, api_delete_challenge, api_get_challenges}};
     use api::v1::auth::get_token_handler::get_token;
     use api::v1::auth::get_identity_handler::get_identity;
     use api::v1::auth::jwt_secret::JwtSecret;
@@ -172,6 +172,7 @@ async fn main() -> std::io::Result<()> {
             .service(api_get_user)
             .service(api_get_challenges)
             .service(api_accept_challenge)
+            .service(api_delete_challenge)
             .service(api_create_challenge)
 
             // .leptos_routes(leptos_options.to_owned(), routes.to_owned(), App)

@@ -1,13 +1,18 @@
 use crate::{
     api::v1::{
         auth::Auth,
-        messages::send::{send_challenge_creation_message, send_challenge_messages},
+        messages::send::{
+            send_challenge_creation_message,
+            send_challenge_messages,
+            send_challenge_removed_message,
+        },
     },
     notifications::{notify, time_control_label, Event},
     responses::{ChallengeResponse, GameResponse},
     websocket::WsHub,
 };
 use actix_web::{
+    delete,
     get,
     post,
     web::{Data, Json, Path},
@@ -187,6 +192,32 @@ pub async fn api_accept_challenge(
     }
 }
 
+#[delete("/api/v1/bot/challenge/{nanoid}")]
+pub async fn api_delete_challenge(
+    nanoid: Path<ChallengeId>,
+    Auth(bot): Auth,
+    pool: Data<DbPool>,
+    hub: Data<Arc<WsHub>>,
+) -> HttpResponse {
+    let nanoid = nanoid.into_inner();
+    match delete_challenge(nanoid.clone(), bot.clone(), pool, hub).await {
+        Ok(_) => HttpResponse::Ok().json(json!({
+          "success": true,
+          "data": {
+            "bot": bot.email,
+            "bot_username": bot.username,
+            "challenge_id": nanoid,
+          }
+        })),
+        Err(e) => HttpResponse::Ok().json(json!({
+          "success": false,
+          "data": {
+            "error": e.to_string(),
+          }
+        })),
+    }
+}
+
 #[post("/api/v1/bot/challenges/")]
 pub async fn api_create_challenge(
     Json(req): Json<BotChallengeRequest>,
@@ -256,6 +287,27 @@ async fn create_challenge(
     send_challenge_creation_message(hub, &challenge_response, &req.visibility, opponent_id).await?;
 
     Ok(challenge_response)
+}
+
+async fn delete_challenge(
+    id: ChallengeId,
+    bot: User,
+    pool: Data<DbPool>,
+    hub: Data<Arc<WsHub>>,
+) -> Result<()> {
+    let mut conn = get_conn(&pool).await?;
+    let challenge = Challenge::find_by_challenge_id(&id, &mut conn).await?;
+
+    if !bot.admin && challenge.challenger_id != bot.id && challenge.opponent_id != Some(bot.id) {
+        return Err(anyhow::anyhow!("This is not your challenge"));
+    }
+
+    let challenge_response = ChallengeResponse::from_model(&challenge, &mut conn).await?;
+    challenge.delete(&mut conn).await?;
+    drop(conn);
+
+    send_challenge_removed_message(hub, challenge_response).await?;
+    Ok(())
 }
 
 async fn accept_challenge(
