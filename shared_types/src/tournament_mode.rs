@@ -6,6 +6,7 @@ use crate::PrettyString;
 #[derive(Serialize, Deserialize, Clone, Debug, PartialEq, Eq, Default)]
 pub enum TournamentMode {
     #[default]
+    RoundRobin,
     DoubleRoundRobin,
     QuadrupleRoundRobin,
     SextupleRoundRobin,
@@ -15,6 +16,7 @@ pub enum TournamentMode {
 impl PrettyString for TournamentMode {
     fn pretty_string(&self) -> String {
         match self {
+            Self::RoundRobin => String::from("Round robin"),
             Self::DoubleRoundRobin => String::from("Double round robin"),
             Self::QuadrupleRoundRobin => String::from("Quadruple round robin"),
             Self::SextupleRoundRobin => String::from("Sextuple round robin"),
@@ -26,6 +28,7 @@ impl PrettyString for TournamentMode {
 impl fmt::Display for TournamentMode {
     fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
         let game_status = match self {
+            Self::RoundRobin => String::from("RoundRobin"),
             Self::DoubleRoundRobin => String::from("DoubleRoundRobin"),
             Self::QuadrupleRoundRobin => String::from("QuadrupleRoundRobin"),
             Self::SextupleRoundRobin => String::from("SextupleRoundRobin"),
@@ -40,6 +43,7 @@ impl FromStr for TournamentMode {
 
     fn from_str(s: &str) -> Result<Self, Self::Err> {
         match s {
+            "RoundRobin" => Ok(TournamentMode::RoundRobin),
             "DoubleRoundRobin" => Ok(TournamentMode::DoubleRoundRobin),
             "QuadrupleRoundRobin" => Ok(TournamentMode::QuadrupleRoundRobin),
             "SextupleRoundRobin" => Ok(TournamentMode::SextupleRoundRobin),
@@ -55,6 +59,13 @@ mod tests {
 
     #[test]
     fn tests_game_status() {
+        {
+            let ts = TournamentMode::RoundRobin;
+            assert_eq!(
+                ts.clone(),
+                TournamentMode::from_str(&format!("{ts}")).unwrap()
+            );
+        }
         {
             let ts = TournamentMode::DoubleRoundRobin;
             assert_eq!(
