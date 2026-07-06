@@ -39,6 +39,7 @@ pub struct TournamentSignals {
     pub seats: RwSignal<i32>,
     pub min_seats: RwSignal<i32>,
     pub rounds: RwSignal<i32>,
+    pub round_robin_pairs: RwSignal<i32>,
     pub invite_only: RwSignal<bool>,
     pub mode: RwSignal<TournamentMode>,
     pub series: RwSignal<Option<Uuid>>,
@@ -61,8 +62,9 @@ impl TournamentSignals {
             seats: RwSignal::new(4),
             min_seats: RwSignal::new(4),
             rounds: RwSignal::new(1),
+            round_robin_pairs: RwSignal::new(1),
             invite_only: RwSignal::new(false),
-            mode: RwSignal::new(TournamentMode::DoubleRoundRobin),
+            mode: RwSignal::new(TournamentMode::RoundRobin),
             series: RwSignal::new(None),
             starts_at: RwSignal::new(Utc::now()),
             round_duration: RwSignal::new(7),
@@ -160,6 +162,11 @@ pub fn TournamentCreate() -> impl IntoView {
             seats: tournament.seats.get_untracked(),
             min_seats: tournament.min_seats.get_untracked(),
             rounds: tournament.rounds.get_untracked(),
+            round_robin_pairs: if tournament.mode.get_untracked() == TournamentMode::DoubleSwiss {
+                0
+            } else {
+                tournament.round_robin_pairs.get_untracked()
+            },
             invite_only: tournament.invite_only.get_untracked(),
             mode: tournament.mode.get_untracked().to_string(),
             time_mode,
@@ -209,6 +216,8 @@ pub fn TournamentCreate() -> impl IntoView {
         TournamentMode::DoubleSwiss => 64,
         _ => 16,
     });
+    let is_round_robin =
+        Signal::derive(move || tournament.mode.get() == TournamentMode::RoundRobin);
     Effect::new(move || {
         let current_max = max_seats.get();
         if tournament.seats.get() > current_max {
@@ -333,18 +342,8 @@ pub fn TournamentCreate() -> impl IntoView {
                             >
                                 <SelectOption
                                     value=tournament.mode
-                                    is="DoubleRoundRobin"
-                                    text=TournamentMode::DoubleRoundRobin.pretty_string()
-                                />
-                                <SelectOption
-                                    value=tournament.mode
-                                    is="QuadrupleRoundRobin"
-                                    text=TournamentMode::QuadrupleRoundRobin.pretty_string()
-                                />
-                                <SelectOption
-                                    value=tournament.mode
-                                    is="SextupleRoundRobin"
-                                    text=TournamentMode::SextupleRoundRobin.pretty_string()
+                                    is="RoundRobin"
+                                    text=TournamentMode::RoundRobin.pretty_string()
                                 />
                                 <Show when=user_allowed_to_run_swiss>
                                     <SelectOption
@@ -355,6 +354,24 @@ pub fn TournamentCreate() -> impl IntoView {
                                 </Show>
                             </select>
                         </label>
+
+                        <Show when=is_round_robin>
+                            <div class="ui-setting-group">
+                                <div class="flex gap-3 justify-between items-center">
+                                    <span class="ui-field-label">"Round robin pairs"</span>
+                                    <span class="font-bold text-gray-900 dark:text-gray-100">
+                                        {tournament.round_robin_pairs}
+                                    </span>
+                                </div>
+                                <InputSlider
+                                    signal_to_update=tournament.round_robin_pairs
+                                    name="Round robin pairs"
+                                    min=1
+                                    max=16
+                                    step=1
+                                />
+                            </div>
+                        </Show>
 
                         <label class="flex flex-col gap-1.5">
                             <span class="ui-field-label">"Scoring"</span>

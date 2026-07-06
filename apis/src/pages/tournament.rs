@@ -257,6 +257,23 @@ fn LoadedTournament(tournament: TournamentResponse) -> impl IntoView {
             Some(TournamentMode::DoubleSwiss)
         )
     });
+    let tournament_mode_label = move || {
+        tournament.with_value(|t| {
+            t.mode
+                .parse::<TournamentMode>()
+                .map(|mode| match mode {
+                    TournamentMode::RoundRobin => {
+                        if t.round_robin_pairs == 1 {
+                            String::from("Round robin (1 pair)")
+                        } else {
+                            format!("Round robin ({} pairs)", t.round_robin_pairs)
+                        }
+                    }
+                    _ => mode.pretty_string(),
+                })
+                .unwrap_or_default()
+        })
+    };
     let game_previews = Memo::new(move |_| {
         games_hashmap.with_value(|hashmap| {
             hashmap
@@ -487,13 +504,7 @@ fn LoadedTournament(tournament: TournamentResponse) -> impl IntoView {
                 <Panel title="Tournament Info" class="min-w-0" body_class="space-y-3 h-fit">
                     <div>
                         <span class="font-bold">"Type: "</span>
-                        {tournament
-                            .with_value(|t| {
-                                t.mode
-                                    .parse::<TournamentMode>()
-                                    .map(|m| m.pretty_string())
-                                    .unwrap_or_default()
-                            })}
+                        {tournament_mode_label}
                     </div>
                     <div class="flex flex-wrap gap-1">
                         <span class="font-bold">"Time control: "</span>
