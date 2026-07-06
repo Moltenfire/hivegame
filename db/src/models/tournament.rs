@@ -77,6 +77,7 @@ pub struct NewTournament {
     pub created_at: DateTime<Utc>,
     pub updated_at: DateTime<Utc>,
     pub series: Option<Uuid>,
+    pub round_robin_pairs: i32,
 }
 
 impl NewTournament {
@@ -119,6 +120,43 @@ impl NewTournament {
             });
         }
 
+        let tournament_mode = TournamentMode::from_str(&details.mode).map_err(|_| {
+            DbError::InvalidTournamentDetails {
+                info: String::from("Invalid tournament mode"),
+            }
+        })?;
+        let (mode, round_robin_pairs) = match tournament_mode {
+            TournamentMode::RoundRobin => {
+                if details.round_robin_pairs < 1 {
+                    return Err(DbError::InvalidTournamentDetails {
+                        info: String::from("Round robin tournaments need at least one pair"),
+                    });
+                }
+                if details.round_robin_pairs > 16 {
+                    return Err(DbError::InvalidTournamentDetails {
+                        info: String::from(
+                            "Round robin tournaments cannot have more than 16 pairs",
+                        ),
+                    });
+                }
+                (
+                    TournamentMode::RoundRobin.to_string(),
+                    details.round_robin_pairs,
+                )
+            }
+            TournamentMode::DoubleRoundRobin => (TournamentMode::RoundRobin.to_string(), 1),
+            TournamentMode::QuadrupleRoundRobin => (TournamentMode::RoundRobin.to_string(), 2),
+            TournamentMode::SextupleRoundRobin => (TournamentMode::RoundRobin.to_string(), 3),
+            TournamentMode::DoubleSwiss => {
+                if details.round_robin_pairs != 0 {
+                    return Err(DbError::InvalidTournamentDetails {
+                        info: String::from("Swiss tournaments cannot have round robin pairs"),
+                    });
+                }
+                (TournamentMode::DoubleSwiss.to_string(), 0)
+            }
+        };
+
         Ok(Self {
             nanoid: nanoid!(11),
             name: details.name,
@@ -133,8 +171,9 @@ impl NewTournament {
             seats: details.seats,
             min_seats: details.min_seats,
             rounds: details.rounds,
+            round_robin_pairs,
             invite_only: details.invite_only,
-            mode: details.mode,
+            mode,
             time_mode: details.time_mode.to_string(),
             time_base: details.time_base,
             time_increment: details.time_increment,
@@ -184,6 +223,7 @@ pub struct Tournament {
     pub created_at: DateTime<Utc>,
     pub updated_at: DateTime<Utc>,
     pub series: Option<Uuid>,
+    pub round_robin_pairs: i32,
 }
 
 impl Tournament {
@@ -697,9 +737,12 @@ impl Tournament {
         let games = match TournamentMode::from_str(&self.mode)
             .expect("Only valid modes should make it to the DB")
         {
-            TournamentMode::DoubleRoundRobin => self.double_round_robin_start(conn).await?,
-            TournamentMode::QuadrupleRoundRobin => self.quad_round_robin_start(conn).await?,
-            TournamentMode::SextupleRoundRobin => self.sextuple_round_robin_start(conn).await?,
+            TournamentMode::RoundRobin => {
+                self.round_robin_start(self.round_robin_pairs, conn).await?
+            }
+            TournamentMode::DoubleRoundRobin => self.round_robin_start(1, conn).await?,
+            TournamentMode::QuadrupleRoundRobin => self.round_robin_start(2, conn).await?,
+            TournamentMode::SextupleRoundRobin => self.round_robin_start(3, conn).await?,
             TournamentMode::DoubleSwiss => self.swiss_create_first_round(conn).await?,
         };
         let tournament: Tournament = diesel::update(self)
@@ -721,8 +764,9 @@ impl Tournament {
         Ok((tournament, games, deleted_invitees))
     }
 
-    pub async fn quad_round_robin_start(
+    pub async fn round_robin_start(
         &self,
+        round_robin_pairs: i32,
         conn: &mut DbConn<'_>,
     ) -> Result<Vec<Game>, DbError> {
         let mut games = Vec::new();
@@ -731,60 +775,10 @@ impl Tournament {
         for combination in combinations {
             let white = combination[0].id;
             let black = combination[1].id;
-            let new_game = NewGame::new_from_tournament(white, black, self);
-            let game = Game::create(new_game, conn).await?;
-            games.push(game);
-            let new_game = NewGame::new_from_tournament(black, white, self);
-            let game = Game::create(new_game, conn).await?;
-            games.push(game);
-            let new_game = NewGame::new_from_tournament(white, black, self);
-            let game = Game::create(new_game, conn).await?;
-            games.push(game);
-            let new_game = NewGame::new_from_tournament(black, white, self);
-            let game = Game::create(new_game, conn).await?;
-            games.push(game);
-        }
-        Ok(games)
-    }
-
-    pub async fn double_round_robin_start(
-        &self,
-        conn: &mut DbConn<'_>,
-    ) -> Result<Vec<Game>, DbError> {
-        let mut games = Vec::new();
-        let players = self.players(conn).await?;
-        let combinations: Vec<Vec<User>> = players.into_iter().combinations(2).collect();
-        for combination in combinations {
-            let white = combination[0].id;
-            let black = combination[1].id;
-            let new_game = NewGame::new_from_tournament(white, black, self);
-            let game = Game::create(new_game, conn).await?;
-            games.push(game);
-            let new_game = NewGame::new_from_tournament(black, white, self);
-            let game = Game::create(new_game, conn).await?;
-            games.push(game);
-        }
-        Ok(games)
-    }
-
-    pub async fn sextuple_round_robin_start(
-        &self,
-        conn: &mut DbConn<'_>,
-    ) -> Result<Vec<Game>, DbError> {
-        let mut games = Vec::new();
-        let players = self.players(conn).await?;
-        let combinations: Vec<Vec<User>> = players.into_iter().combinations(2).collect();
-        for combination in combinations {
-            let white = combination[0].id;
-            let black = combination[1].id;
-
-            for _ in 0..3 {
+            for _ in 0..round_robin_pairs {
                 let new_game = NewGame::new_from_tournament(white, black, self);
                 let game = Game::create(new_game, conn).await?;
                 games.push(game);
-            }
-
-            for _ in 0..3 {
                 let new_game = NewGame::new_from_tournament(black, white, self);
                 let game = Game::create(new_game, conn).await?;
                 games.push(game);

@@ -239,6 +239,7 @@ diesel::table! {
         created_at -> Timestamptz,
         updated_at -> Timestamptz,
         series -> Nullable<Uuid>,
+        round_robin_pairs -> Int4,
     }
 }
 

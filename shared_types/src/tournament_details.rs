@@ -13,6 +13,8 @@ pub struct TournamentDetails {
     pub seats: i32,
     pub min_seats: i32,
     pub rounds: i32,
+    #[serde(default)]
+    pub round_robin_pairs: i32,
     pub invite_only: bool,
     pub mode: String,
     pub time_mode: TimeMode,
