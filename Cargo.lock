@@ -1546,6 +1546,8 @@ dependencies = [
 name = "db"
 version = "0.1.0"
 dependencies = [
+ "anyhow",
+ "argon2",
  "bb8",
  "chrono",
  "diesel",
