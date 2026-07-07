@@ -1,9 +1,11 @@
 use crate::{
     api::v1::{
         auth::Auth,
-        messages::send::{send_control_messages, send_turn_messages},
+        messages::send::{send_control_messages, send_messages_batch, send_turn_messages},
     },
-    websocket::WsHub,
+    common::{GameActionResponse, GameReaction, GameUpdate, ServerMessage},
+    responses::GameResponse,
+    websocket::{reaction_messages, InternalServerMessage, MessageDestination, WsHub},
 };
 use actix_web::{
     post,
@@ -17,11 +19,13 @@ use db_lib::{
     DbPool,
 };
 use diesel_async::{scoped_futures::ScopedFutureExt, AsyncConnection};
-use hive_lib::{Color, GameControl, Piece, Position, State, Turn};
+use hive_lib::{Color, GameControl, GameStatus, Piece, Position, State, Turn};
 use serde::{Deserialize, Serialize};
 use serde_json::json;
 use shared_types::GameId;
 use std::{str::FromStr, sync::Arc};
+
+const START_READY_SECONDS: u64 = 35;
 
 #[derive(Serialize, Deserialize)]
 struct PlayRequest {
@@ -33,6 +37,13 @@ struct PlayRequest {
 struct ControlRequest {
     game_id: GameId,
     control: String,
+}
+
+struct ControlOutcome {
+    game: Game,
+    ready: bool,
+    started: bool,
+    ready_seconds_left: Option<u64>,
 }
 
 #[post("/api/v1/bot/games/play")]
@@ -130,13 +141,17 @@ pub async fn api_control(
     hub: Data<Arc<WsHub>>,
 ) -> HttpResponse {
     match handle_control(req, bot.clone(), pool, hub).await {
-        Ok(game) => HttpResponse::Ok().json(json!({
+        Ok(outcome) => HttpResponse::Ok().json(json!({
           "success": true,
           "data": {
             "bot": bot.email,
             "bot_username": bot.username,
-            "game_id": game.nanoid,
-            "finished": game.finished,
+            "game_id": outcome.game.nanoid,
+            "game_status": outcome.game.game_status,
+            "finished": outcome.game.finished,
+            "ready": outcome.ready,
+            "started": outcome.started,
+            "ready_seconds_left": outcome.ready_seconds_left,
           }
         })),
         Err(e) => HttpResponse::Ok().json(json!({
@@ -153,7 +168,7 @@ async fn handle_control(
     bot: User,
     pool: Data<DbPool>,
     hub: Data<Arc<WsHub>>,
-) -> Result<Game> {
+) -> Result<ControlOutcome> {
     let cloned_pool = pool.clone();
     let mut conn = get_conn(&cloned_pool).await?;
     let game = Game::find_by_game_id(&req.game_id, &mut conn).await?;
@@ -169,6 +184,34 @@ async fn handle_control(
     } else {
         return Err(anyhow!("Not your game"));
     };
+
+    if req.control == "start" {
+        let should_start = hub
+            .data
+            .game_start
+            .should_start(&game, bot.id)
+            .map_err(|e| anyhow!(e.to_string()))?;
+
+        let (game, reaction) = if should_start {
+            let started_game = conn
+                .transaction::<_, anyhow::Error, _>(move |tc| {
+                    async move { Ok(game.start(tc).await?) }.scope_boxed()
+                })
+                .await?;
+            (started_game, GameReaction::Started)
+        } else {
+            (game, GameReaction::Ready)
+        };
+
+        let started = matches!(&reaction, GameReaction::Started);
+        send_start_messages(hub.clone(), &game, &bot, &pool, reaction).await?;
+        return Ok(ControlOutcome {
+            game,
+            ready: !started,
+            started,
+            ready_seconds_left: (!started).then_some(START_READY_SECONDS),
+        });
+    }
 
     let game_control = match req.control.as_str() {
         "resign" => {
@@ -229,5 +272,51 @@ async fn handle_control(
         })
         .await?;
 
-    Ok(updated_game)
+    Ok(ControlOutcome {
+        game: updated_game,
+        ready: false,
+        started: false,
+        ready_seconds_left: None,
+    })
+}
+
+async fn send_start_messages(
+    hub: Data<Arc<WsHub>>,
+    game: &Game,
+    bot: &User,
+    pool: &Data<DbPool>,
+    reaction: GameReaction,
+) -> Result<()> {
+    let mut conn = get_conn(pool).await?;
+    let game_response = GameResponse::from_model(game, &mut conn).await?;
+    let action_response = GameActionResponse {
+        game_id: game_response.game_id.clone(),
+        game: game_response.clone(),
+        game_action: reaction,
+        user_id: bot.id,
+        username: bot.username.clone(),
+    };
+
+    let mut messages = Vec::new();
+    messages.extend(reaction_messages(
+        action_response.game_id.clone(),
+        game.white_id,
+        game.black_id,
+        action_response,
+    ));
+
+    if game.game_status == GameStatus::InProgress.to_string() {
+        for user_id in [game.white_id, game.black_id] {
+            let user = User::find_by_uuid(&user_id, &mut conn).await?;
+            let games = user.get_games_with_notifications(&mut conn).await?;
+            let game_responses = GameResponse::from_games_batch(games, &mut conn).await?;
+            messages.push(InternalServerMessage {
+                destination: MessageDestination::User(user_id),
+                message: ServerMessage::Game(Box::new(GameUpdate::Urgent(game_responses))),
+            });
+        }
+    }
+
+    send_messages_batch(hub.as_ref(), messages).await;
+    Ok(())
 }

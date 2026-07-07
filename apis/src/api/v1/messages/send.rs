@@ -46,7 +46,7 @@ fn get_opponent_id(game: &Game, bot: &User) -> uuid::Uuid {
     }
 }
 
-async fn send_messages_batch(hub: &Arc<WsHub>, messages: Vec<InternalServerMessage>) {
+pub async fn send_messages_batch(hub: &Arc<WsHub>, messages: Vec<InternalServerMessage>) {
     for message in messages {
         let serialized = ServerResult::Ok(Box::new(message.message));
         if let Ok(serialized) = MsgpackSerdeCodec::encode(&serialized) {
