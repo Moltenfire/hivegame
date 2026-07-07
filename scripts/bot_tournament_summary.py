@@ -1,0 +1,905 @@
+#!/usr/bin/env python3
+import argparse
+import base64
+import binascii
+import datetime as dt
+import hashlib
+import json
+import re
+import sys
+import time
+from typing import Any
+
+import requests
+
+
+COORD_PREFIX = "[bot-coord] "
+POLL_SECONDS = 5.0
+POLL_JITTER_SECONDS = 1.5
+HEARTBEAT_SECONDS = 20.0
+ONLINE_SECONDS = 45.0
+OFFER_SECONDS = 30.0
+
+
+class ApiError(Exception):
+    pass
+
+
+class ConfigError(Exception):
+    pass
+
+
+def parse_args() -> argparse.Namespace:
+    parent = argparse.ArgumentParser(add_help=False)
+    parent.add_argument("config", help="JSON config file for this bot.")
+
+    parser = argparse.ArgumentParser(
+        description="Print a bot's games and openings for a Hive tournament."
+    )
+    subparsers = parser.add_subparsers(dest="command")
+
+    subparsers.add_parser(
+        "summary",
+        parents=[parent],
+        help="Print the tournament summary table.",
+    )
+    run_parser = subparsers.add_parser(
+        "run",
+        parents=[parent],
+        help="Poll tournament chat and coordinate bot game starts.",
+    )
+    run_parser.add_argument(
+        "--poll-seconds",
+        type=float,
+        default=POLL_SECONDS,
+        help=f"Base polling interval. Defaults to {POLL_SECONDS:g} seconds.",
+    )
+
+    if len(sys.argv) > 1 and sys.argv[1] not in {"summary", "run", "-h", "--help"}:
+        args = parser.parse_args(["summary", *sys.argv[1:]])
+        args.command = "summary"
+        return args
+
+    return parser.parse_args()
+
+
+def load_config(path: str) -> dict[str, Any]:
+    try:
+        with open(path, "r", encoding="utf-8") as file:
+            config = json.load(file)
+    except OSError as exc:
+        raise ConfigError(f"Could not read config file {path}: {exc}") from exc
+    except json.JSONDecodeError as exc:
+        raise ConfigError(f"Config file {path} is not valid JSON: {exc}") from exc
+    if not isinstance(config, dict):
+        raise ConfigError("Config file must contain a JSON object")
+    return config
+
+
+def apply_config(args: argparse.Namespace) -> argparse.Namespace:
+    config = load_config(args.config)
+    args.url = config.get("url")
+    args.tournament_id = config.get("tournament_id")
+    args.bot_name = config.get("name")
+    args.email = config.get("email")
+    args.password = config.get("password")
+
+    required = {
+        "url": args.url,
+        "tournament_id": args.tournament_id,
+        "name": args.bot_name,
+        "email": args.email,
+        "password": args.password,
+    }
+    missing = [key for key, value in required.items() if not isinstance(value, str) or not value]
+    if missing:
+        raise ConfigError(f"Config missing required string field(s): {', '.join(missing)}")
+    return args
+
+
+def decode_jwt_exp(token: str) -> int | None:
+    parts = token.split(".")
+    if len(parts) < 2:
+        return None
+    payload = parts[1] + "=" * (-len(parts[1]) % 4)
+    try:
+        decoded = base64.urlsafe_b64decode(payload.encode("ascii"))
+        claims = json.loads(decoded)
+    except (binascii.Error, ValueError, json.JSONDecodeError):
+        return None
+    exp = claims.get("exp")
+    return exp if isinstance(exp, int) else None
+
+
+class AuthSession:
+    def __init__(
+        self,
+        base_url: str,
+        email: str,
+        password: str,
+    ) -> None:
+        self.base_url = base_url.rstrip("/")
+        self.token: str | None = None
+        self.email = email
+        self.password = password
+        self.token_exp: int | None = None
+
+    def bearer_token(self) -> str:
+        if self.token_expiring_soon():
+            self.refresh()
+        if not self.token:
+            self.refresh()
+        if not self.token:
+            raise ApiError("No bearer token available")
+        return self.token
+
+    def token_expiring_soon(self) -> bool:
+        if not self.token:
+            return True
+        if self.token_exp is None:
+            return False
+        return self.token_exp <= int(time.time()) + 120
+
+    def refresh(self) -> None:
+        url = f"{self.base_url}/api/v1/auth/token"
+        try:
+            response = requests.post(
+                url,
+                json={"email": self.email, "password": self.password},
+                timeout=20,
+            )
+        except requests.RequestException as exc:
+            raise ApiError(f"Could not call {url}: {exc}") from exc
+
+        if not response.ok:
+            raise ApiError(
+                f"HTTP {response.status_code} from {url}: {response.text.strip()}"
+            )
+
+        try:
+            payload = response.json()
+        except ValueError as exc:
+            raise ApiError(f"Response from {url} was not JSON") from exc
+
+        if not payload.get("success"):
+            message = payload.get("data", {}).get("message", "unknown API error")
+            raise ApiError(f"API error from {url}: {message}")
+
+        token = payload.get("data", {}).get("token")
+        if not isinstance(token, str):
+            raise ApiError(f"API response from {url} did not include data.token")
+
+        self.token = token
+        self.token_exp = decode_jwt_exp(token)
+        if self.token_exp:
+            expires_at = dt.datetime.fromtimestamp(self.token_exp, dt.UTC)
+            print(f"refreshed token; expires at {expires_at.isoformat()}", flush=True)
+        else:
+            print("refreshed token", flush=True)
+
+
+def is_expired_signature(response: requests.Response, payload: dict[str, Any] | None) -> bool:
+    if response.status_code == 401:
+        return True
+    if not payload:
+        return False
+    data = payload.get("data")
+    if not isinstance(data, dict):
+        return False
+    return data.get("message") == "ExpiredSignature" or data.get("error") == "ExpiredSignature"
+
+
+def api_request(
+    method: str,
+    auth: AuthSession,
+    path: str,
+    body: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    url = f"{auth.base_url}{path}"
+    for attempt in range(2):
+        try:
+            response = requests.request(
+                method,
+                url,
+                headers={"Authorization": f"Bearer {auth.bearer_token()}"},
+                json=body,
+                timeout=20,
+            )
+        except requests.RequestException as exc:
+            raise ApiError(f"Could not call {url}: {exc}") from exc
+
+        payload = None
+        try:
+            payload = response.json()
+        except ValueError:
+            pass
+
+        if is_expired_signature(response, payload) and attempt == 0:
+            auth.refresh()
+            continue
+
+        if not response.ok:
+            raise ApiError(
+                f"HTTP {response.status_code} from {url}: {response.text.strip()}"
+            )
+
+        if payload is None:
+            raise ApiError(f"Response from {url} was not JSON")
+
+        if not payload.get("success"):
+            data_payload = payload.get("data", {})
+            if isinstance(data_payload, dict):
+                error = (
+                    data_payload.get("error")
+                    or data_payload.get("message")
+                    or "unknown API error"
+                )
+            else:
+                error = "unknown API error"
+            raise ApiError(f"API error from {url}: {error}")
+
+        data = payload.get("data")
+        if not isinstance(data, dict):
+            raise ApiError(f"API response from {url} did not include data")
+
+        return data
+
+    raise ApiError(f"Could not refresh token for {url}")
+
+
+def get_tournament(auth: AuthSession, tournament_id: str) -> dict[str, Any]:
+    data = api_request(
+        "GET",
+        auth,
+        f"/api/v1/bot/tournament/{tournament_id}",
+    )
+    tournament = data.get("tournament")
+    if not isinstance(tournament, dict):
+        raise ApiError("API response did not include data.tournament")
+
+    return tournament
+
+
+def get_tournament_chat(auth: AuthSession, tournament_id: str) -> list[dict[str, Any]]:
+    data = api_request(
+        "GET",
+        auth,
+        f"/api/v1/bot/tournament/{tournament_id}/chat",
+    )
+    messages = data.get("messages")
+    if not isinstance(messages, list):
+        raise ApiError("API response did not include data.messages as a list")
+    return [message for message in messages if isinstance(message, dict)]
+
+
+def post_tournament_chat(
+    auth: AuthSession, tournament_id: str, message: str
+) -> None:
+    api_request(
+        "POST",
+        auth,
+        f"/api/v1/bot/tournament/{tournament_id}/chat",
+        {"message": message},
+    )
+
+
+def start_game(auth: AuthSession, game_id_: str) -> dict[str, Any]:
+    return api_request(
+        "POST",
+        auth,
+        "/api/v1/bot/games/control",
+        {"game_id": game_id_, "control": "start"},
+    )
+
+
+def opening_heading(line: str) -> bool:
+    stripped = line.strip()
+    while stripped.startswith("#"):
+        stripped = stripped[1:].lstrip()
+    return stripped.lower() == "openings"
+
+
+def is_heading(line: str) -> bool:
+    return line.lstrip().startswith("#")
+
+
+def extract_openings(description: str) -> list[str]:
+    openings: list[str] = []
+    in_openings = False
+
+    for line in description.splitlines():
+        stripped = line.strip()
+        if not in_openings:
+            if opening_heading(stripped):
+                in_openings = True
+            continue
+
+        if not stripped:
+            continue
+        if is_heading(stripped):
+            break
+        if stripped.startswith("- "):
+            openings.append(stripped[2:].strip())
+            continue
+        break
+
+    return openings
+
+
+def bot_games(tournament: dict[str, Any], bot_name: str) -> list[dict[str, Any]]:
+    games = tournament.get("games")
+    if not isinstance(games, list):
+        raise ApiError("API response did not include tournament.games as a list")
+
+    bot_name_lower = bot_name.lower()
+    filtered = []
+    for game in games:
+        if not isinstance(game, dict):
+            continue
+        white = game.get("white_player") or {}
+        black = game.get("black_player") or {}
+        white_name = str(white.get("username", ""))
+        black_name = str(black.get("username", ""))
+        if white_name.lower() == bot_name_lower or black_name.lower() == bot_name_lower:
+            filtered.append(game)
+
+    return sorted(filtered, key=game_sort_key)
+
+
+def player_name(game: dict[str, Any], color: str) -> str:
+    player = game.get(f"{color}_player") or {}
+    return str(player.get("username", ""))
+
+
+def game_id(game: dict[str, Any]) -> str:
+    return str(game.get("game_id", ""))
+
+
+def natural_text_key(value: str) -> tuple[Any, ...]:
+    parts = re.split(r"(\d+)", value.casefold())
+    return tuple(int(part) if part.isdigit() else part for part in parts)
+
+
+def game_sort_key(game: dict[str, Any]) -> tuple[tuple[Any, ...], tuple[Any, ...], str]:
+    return (
+        natural_text_key(player_name(game, "white")),
+        natural_text_key(player_name(game, "black")),
+        game_id(game),
+    )
+
+
+def opening_by_game_id(
+    games: list[dict[str, Any]], openings: list[str]
+) -> dict[str, str]:
+    assigned: dict[str, str] = {}
+    groups: dict[tuple[str, str], list[dict[str, Any]]] = {}
+
+    for game in games:
+        key = (player_name(game, "white").casefold(), player_name(game, "black").casefold())
+        groups.setdefault(key, []).append(game)
+
+    for group in groups.values():
+        for index, game in enumerate(sorted(group, key=lambda item: game_id(item))):
+            assigned[game_id(game)] = openings[index] if index < len(openings) else ""
+
+    return assigned
+
+
+def render_table(headers: list[str], rows: list[list[str]]) -> None:
+    widths = [
+        max(len(row[index]) for row in [headers, *rows])
+        for index in range(len(headers))
+    ]
+
+    def render_row(row: list[str]) -> str:
+        return " | ".join(value.ljust(widths[index]) for index, value in enumerate(row))
+
+    print(render_row(headers))
+    print("-+-".join("-" * width for width in widths))
+    for row in rows:
+        print(render_row(row))
+
+
+def game_result(game: dict[str, Any]) -> str:
+    result = game.get("tournament_game_result") or ""
+    if result == "Unknown":
+        return ""
+    if result == "Draw":
+        return "1/2-1/2"
+    if result == "DoubeForfeit":
+        return "0-0"
+    if isinstance(result, dict) and set(result.keys()) == {"Winner"}:
+        winner = result["Winner"]
+        if winner == "White":
+            return "1-0"
+        if winner == "Black":
+            return "0-1"
+        return f"Winner: {winner}"
+    return str(result)
+
+
+def utc_now() -> dt.datetime:
+    return dt.datetime.now(dt.UTC)
+
+
+def parse_timestamp(value: Any, fallback: dt.datetime) -> dt.datetime:
+    if not isinstance(value, str):
+        return fallback
+    try:
+        return dt.datetime.fromisoformat(value.replace("Z", "+00:00")).astimezone(dt.UTC)
+    except ValueError:
+        return fallback
+
+
+def coord_json(message: dict[str, Any], now: dt.datetime) -> dict[str, Any] | None:
+    chat_message = message.get("message")
+    if not isinstance(chat_message, dict):
+        return None
+    text = chat_message.get("message")
+    if not isinstance(text, str) or not text.startswith(COORD_PREFIX):
+        return None
+    try:
+        payload = json.loads(text[len(COORD_PREFIX) :])
+    except json.JSONDecodeError:
+        return None
+    if not isinstance(payload, dict):
+        return None
+
+    payload["_timestamp"] = parse_timestamp(chat_message.get("timestamp"), now)
+    return payload
+
+
+def coord_messages(
+    chat_messages: list[dict[str, Any]], tournament_id: str, now: dt.datetime
+) -> list[dict[str, Any]]:
+    parsed = []
+    for message in chat_messages:
+        payload = coord_json(message, now)
+        if (
+            payload
+            and payload.get("v") == 1
+            and payload.get("tournament_id") == tournament_id
+        ):
+            parsed.append(payload)
+    return parsed
+
+
+def recent_messages(
+    messages: list[dict[str, Any]], message_type: str, max_age: float, now: dt.datetime
+) -> list[dict[str, Any]]:
+    fresh = []
+    for message in messages:
+        timestamp = message.get("_timestamp")
+        if (
+            message.get("type") == message_type
+            and isinstance(timestamp, dt.datetime)
+            and (now - timestamp).total_seconds() <= max_age
+        ):
+            fresh.append(message)
+    return fresh
+
+
+def latest_heartbeats(
+    messages: list[dict[str, Any]], now: dt.datetime
+) -> dict[str, dict[str, Any]]:
+    latest: dict[str, dict[str, Any]] = {}
+    for message in recent_messages(messages, "heartbeat", ONLINE_SECONDS, now):
+        bot = message.get("bot")
+        timestamp = message.get("_timestamp")
+        if not isinstance(bot, str) or not isinstance(timestamp, dt.datetime):
+            continue
+        previous = latest.get(bot)
+        if not previous or timestamp > previous["_timestamp"]:
+            latest[bot] = message
+    return latest
+
+
+def fresh_offers(messages: list[dict[str, Any]], now: dt.datetime) -> list[dict[str, Any]]:
+    return [
+        message
+        for message in recent_messages(messages, "offer", OFFER_SECONDS, now)
+        if isinstance(message.get("bot"), str)
+        and isinstance(message.get("to"), str)
+        and isinstance(message.get("game_id"), str)
+    ]
+
+
+def player_names(game: dict[str, Any]) -> tuple[str, str]:
+    return player_name(game, "white"), player_name(game, "black")
+
+
+def player_in_game(game: dict[str, Any], bot_name: str) -> bool:
+    white, black = player_names(game)
+    return bot_name == white or bot_name == black
+
+
+def in_progress_game_for(
+    games: list[dict[str, Any]], bot_name: str
+) -> dict[str, Any] | None:
+    for game in games:
+        if (
+            isinstance(game, dict)
+            and not game.get("finished", False)
+            and game.get("game_status") == "InProgress"
+            and player_in_game(game, bot_name)
+        ):
+            return game
+    return None
+
+
+def offer_players(offer: dict[str, Any]) -> set[str]:
+    return {str(offer.get("bot", "")), str(offer.get("to", ""))}
+
+
+def offer_matches_game(offer: dict[str, Any], game: dict[str, Any]) -> bool:
+    white, black = player_names(game)
+    return offer.get("game_id") == game_id(game) and offer_players(offer) == {white, black}
+
+
+def bot_has_fresh_offer(bot_name: str, offers: list[dict[str, Any]]) -> bool:
+    return any(bot_name in offer_players(offer) for offer in offers)
+
+
+def bot_unavailable(
+    bot_name: str,
+    games: list[dict[str, Any]],
+    heartbeats: dict[str, dict[str, Any]],
+    offers: list[dict[str, Any]],
+    allowed_offer: dict[str, Any] | None = None,
+) -> bool:
+    if in_progress_game_for(games, bot_name):
+        return True
+
+    blocking_offers = [
+        offer for offer in offers if allowed_offer is None or offer is not allowed_offer
+    ]
+    if bot_has_fresh_offer(bot_name, blocking_offers):
+        return True
+
+    state = str(heartbeats.get(bot_name, {}).get("state", ""))
+    if state == "busy":
+        return True
+    if state == "offering" and allowed_offer is None:
+        return True
+    return False
+
+
+def game_eligible(
+    game: dict[str, Any],
+    games: list[dict[str, Any]],
+    heartbeats: dict[str, dict[str, Any]],
+    offers: list[dict[str, Any]],
+    allowed_offer: dict[str, Any] | None = None,
+) -> bool:
+    if game.get("finished", False) or game.get("game_status") != "NotStarted":
+        return False
+
+    white, black = player_names(game)
+    if not white or not black or white not in heartbeats or black not in heartbeats:
+        return False
+
+    if (
+        bot_unavailable(white, games, heartbeats, offers, allowed_offer)
+        or bot_unavailable(black, games, heartbeats, offers, allowed_offer)
+    ):
+        return False
+
+    for offer in offers:
+        if allowed_offer is not None and offer is allowed_offer:
+            continue
+        if white in offer_players(offer) or black in offer_players(offer):
+            return False
+
+    return True
+
+
+def eligible_games(
+    games: list[dict[str, Any]],
+    heartbeats: dict[str, dict[str, Any]],
+    offers: list[dict[str, Any]],
+) -> list[dict[str, Any]]:
+    return sorted(
+        [
+            game
+            for game in games
+            if isinstance(game, dict)
+            and game_eligible(game, games, heartbeats, offers)
+        ],
+        key=game_sort_key,
+    )
+
+
+def deterministic_jitter(bot_name: str) -> float:
+    digest = hashlib.sha256(bot_name.encode("utf-8")).digest()
+    value = int.from_bytes(digest[:2], "big") / 65535
+    return value * POLL_JITTER_SECONDS
+
+
+def coord_message(payload: dict[str, Any]) -> str:
+    return f"{COORD_PREFIX}{json.dumps(payload, separators=(',', ':'), sort_keys=True)}"
+
+
+def heartbeat_state(
+    bot_name: str, games: list[dict[str, Any]], offers: list[dict[str, Any]]
+) -> tuple[str, str | None]:
+    game = in_progress_game_for(games, bot_name)
+    if game:
+        return "busy", game_id(game)
+    for offer in offers:
+        if offer.get("bot") == bot_name:
+            return "offering", str(offer.get("game_id"))
+    return "idle", None
+
+
+def post_heartbeat(
+    auth: AuthSession,
+    tournament_id: str,
+    bot_name: str,
+    state: str,
+    game_id_: str | None,
+) -> None:
+    post_tournament_chat(
+        auth,
+        tournament_id,
+        coord_message(
+            {
+                "v": 1,
+                "type": "heartbeat",
+                "bot": bot_name,
+                "tournament_id": tournament_id,
+                "state": state,
+                "game_id": game_id_,
+            }
+        ),
+    )
+
+
+def post_offer(
+    auth: AuthSession,
+    tournament_id: str,
+    bot_name: str,
+    opponent: str,
+    game_id_: str,
+) -> None:
+    post_tournament_chat(
+        auth,
+        tournament_id,
+        coord_message(
+            {
+                "v": 1,
+                "type": "offer",
+                "bot": bot_name,
+                "to": opponent,
+                "tournament_id": tournament_id,
+                "game_id": game_id_,
+            }
+        ),
+    )
+
+
+def post_accept(
+    auth: AuthSession,
+    tournament_id: str,
+    bot_name: str,
+    opponent: str,
+    game_id_: str,
+) -> None:
+    post_tournament_chat(
+        auth,
+        tournament_id,
+        coord_message(
+            {
+                "v": 1,
+                "type": "accept",
+                "bot": bot_name,
+                "to": opponent,
+                "tournament_id": tournament_id,
+                "game_id": game_id_,
+            }
+        ),
+    )
+
+
+def tournament_games(tournament: dict[str, Any]) -> list[dict[str, Any]]:
+    games = tournament.get("games")
+    if not isinstance(games, list):
+        raise ApiError("API response did not include tournament.games as a list")
+    return [game for game in games if isinstance(game, dict)]
+
+
+def self_heartbeat(
+    bot_name: str, tournament_id: str, state: str, game_id_: str | None
+) -> dict[str, Any]:
+    return {
+        "v": 1,
+        "type": "heartbeat",
+        "bot": bot_name,
+        "tournament_id": tournament_id,
+        "state": state,
+        "game_id": game_id_,
+        "_timestamp": utc_now(),
+    }
+
+
+def run_once(
+    auth: AuthSession,
+    tournament_id: str,
+    bot_name: str,
+    last_heartbeat_at: dt.datetime | None,
+) -> dt.datetime | None:
+    now = utc_now()
+    tournament = get_tournament(auth, tournament_id)
+    games = tournament_games(tournament)
+    chat = get_tournament_chat(auth, tournament_id)
+    messages = coord_messages(chat, tournament_id, now)
+    offers = fresh_offers(messages, now)
+    state, state_game_id = heartbeat_state(bot_name, games, offers)
+
+    if (
+        last_heartbeat_at is None
+        or (now - last_heartbeat_at).total_seconds() >= HEARTBEAT_SECONDS
+    ):
+        post_heartbeat(auth, tournament_id, bot_name, state, state_game_id)
+        last_heartbeat_at = utc_now()
+        messages.append(self_heartbeat(bot_name, tournament_id, state, state_game_id))
+
+    heartbeats = latest_heartbeats(messages, utc_now())
+    if state != "idle":
+        return last_heartbeat_at
+
+    incoming = sorted(
+        [offer for offer in offers if offer.get("to") == bot_name],
+        key=lambda offer: (
+            next(
+                (
+                    game_sort_key(game)
+                    for game in games
+                    if game_id(game) == offer.get("game_id")
+                ),
+                ((), (), str(offer.get("game_id", ""))),
+            ),
+            offer.get("_timestamp", now),
+        ),
+    )
+    for offer in incoming:
+        game = next(
+            (candidate for candidate in games if game_id(candidate) == offer.get("game_id")),
+            None,
+        )
+        if (
+            not game
+            or player_name(game, "white") != offer.get("bot")
+            or player_name(game, "black") != bot_name
+            or not offer_matches_game(offer, game)
+            or not game_eligible(game, games, heartbeats, offers, offer)
+        ):
+            continue
+        print(
+            f"accepting offer for {game_id(game)} from {offer.get('bot')}",
+            flush=True,
+        )
+        post_accept(
+            auth,
+            tournament_id,
+            bot_name,
+            str(offer.get("bot")),
+            game_id(game),
+        )
+        outcome = start_game(auth, game_id(game))
+        print(
+            f"start response for {game_id(game)}: "
+            f"ready={outcome.get('ready')} started={outcome.get('started')}",
+            flush=True,
+        )
+        return last_heartbeat_at
+
+    if bot_unavailable(bot_name, games, heartbeats, offers):
+        return last_heartbeat_at
+
+    for game in eligible_games(games, heartbeats, offers):
+        white, black = player_names(game)
+        if white != bot_name:
+            continue
+        gid = game_id(game)
+        print(f"offering {gid} to {black}", flush=True)
+        post_offer(auth, tournament_id, bot_name, black, gid)
+        outcome = start_game(auth, gid)
+        print(
+            f"start response for {gid}: "
+            f"ready={outcome.get('ready')} started={outcome.get('started')}",
+            flush=True,
+        )
+        return last_heartbeat_at
+
+    return last_heartbeat_at
+
+
+def run_coordinator(args: argparse.Namespace) -> int:
+    auth = AuthSession(args.url, args.email, args.password)
+    jitter = deterministic_jitter(args.bot_name)
+    last_heartbeat_at: dt.datetime | None = None
+    print(
+        f"coordinating tournament {args.tournament_id} as {args.bot_name} "
+        f"against {args.url.rstrip('/')} (poll {args.poll_seconds:g}s + {jitter:.2f}s jitter)",
+        flush=True,
+    )
+    try:
+        while True:
+            try:
+                last_heartbeat_at = run_once(
+                    auth,
+                    args.tournament_id,
+                    args.bot_name,
+                    last_heartbeat_at,
+                )
+            except ApiError as exc:
+                print(f"warning: {exc}", file=sys.stderr, flush=True)
+            time.sleep(max(0.5, args.poll_seconds + jitter))
+    except KeyboardInterrupt:
+        print("stopped", flush=True)
+        return 0
+
+
+def print_summary(tournament: dict[str, Any], bot_name: str) -> None:
+    tournament_name = tournament.get("name", "")
+    tournament_id = tournament.get("tournament_id", "")
+    title = f"{tournament_name} ({tournament_id})".strip()
+    if title:
+        print(title)
+        print("=" * len(title))
+        print()
+
+    print("Openings")
+    print("--------")
+    openings = extract_openings(str(tournament.get("description") or ""))
+    if openings:
+        for opening in openings:
+            print(f"- {opening}")
+    else:
+        print("No openings found")
+    print()
+
+    print("Games")
+    print("-----")
+    games = bot_games(tournament, bot_name)
+    if not games:
+        print(f"No games found for {bot_name}")
+        return
+
+    assigned_openings = opening_by_game_id(games, openings)
+    rows = []
+    for game in games:
+        gid = game_id(game)
+        rows.append(
+            [
+                gid,
+                player_name(game, "white"),
+                player_name(game, "black"),
+                game_result(game),
+                assigned_openings.get(gid, ""),
+            ]
+        )
+
+    render_table(["Game ID", "White", "Black", "Result", "Opening"], rows)
+
+
+def main() -> int:
+    try:
+        args = apply_config(parse_args())
+        if args.command is None:
+            print("error: command required: summary or run", file=sys.stderr)
+            return 2
+        if args.command == "run":
+            return run_coordinator(args)
+
+        auth = AuthSession(args.url, args.email, args.password)
+        tournament = get_tournament(auth, args.tournament_id)
+        print_summary(tournament, args.bot_name)
+    except (ApiError, ConfigError) as exc:
+        print(f"error: {exc}", file=sys.stderr)
+        return 1
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())
