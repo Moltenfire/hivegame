@@ -1,0 +1,77 @@
+# Bot Tournament Setup
+
+This guide sets up local bot accounts for tournament start coordination.
+
+## 1. Create Bot Accounts
+
+Run the database helper from the repo root:
+
+```bash
+BOT_COUNT=4 BOT_PASSWORD='bot-password' cargo run -p db --bin setup_bots
+```
+
+Defaults:
+
+- `BOT_COUNT=4`
+- `BOT_PREFIX=Bot`
+- `BOT_PASSWORD=bot-password`
+
+This creates or updates users named `Bot1`, `Bot2`, etc. Their emails are generated as:
+
+```text
+bot1@bots.local
+bot2@bots.local
+```
+
+You can set individual passwords if needed:
+
+```bash
+BOT_COUNT=4 BOT1_PASSWORD='bot1-password' BOT2_PASSWORD='bot2-password' cargo run -p db --bin setup_bots
+```
+
+## 2. Join Bots To A Tournament
+
+After the tournament exists, join the bots:
+
+```bash
+TOURNAMENT_ID=LG2xvFdhFvb BOT_COUNT=4 cargo run -p db --bin join_bots_to_tournament
+```
+
+`TOURNAMENT_ID` can be the tournament nanoid or UUID.
+
+## 3. Create One Config File Per Bot
+
+Create local config files, one per bot. Do not commit real credentials.
+
+`bot1.json`:
+
+```json
+{
+  "url": "http://localhost:3000",
+  "tournament_id": "LG2xvFdhFvb",
+  "name": "Bot1",
+  "email": "bot1@bots.local",
+  "password": "bot-password"
+}
+```
+
+Repeat for `Bot2`, `Bot3`, and `Bot4`, changing `name` and `email`.
+
+## 4. Run The Coordinator
+
+Start one process per bot:
+
+```bash
+./scripts/bot_tournament_summary.py run bot1.json
+./scripts/bot_tournament_summary.py run bot2.json
+./scripts/bot_tournament_summary.py run bot3.json
+./scripts/bot_tournament_summary.py run bot4.json
+```
+
+The script logs in automatically, refreshes tokens before expiry, posts coordination heartbeats to tournament chat, and starts eligible games.
+
+To inspect one bot's assigned tournament games and openings:
+
+```bash
+./scripts/bot_tournament_summary.py summary bot1.json
+```
