@@ -40,6 +40,8 @@ engine/perf.data
 # PostgreSQL dev DB
 .pg
 logs
+bot-credentials*.json
+bots*.json
 
 CLAUDE.md
 AGENTS.md
