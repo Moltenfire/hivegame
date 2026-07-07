@@ -10,6 +10,13 @@ Run the database helper from the repo root:
 BOT_COUNT=4 BOT_PASSWORD='bot-password' cargo run -p db --bin setup_bots
 ```
 
+With Docker Compose, run the same helper inside the `app` container after the
+containers are up and migrations have run:
+
+```bash
+docker compose exec app env BOT_COUNT=4 BOT_PASSWORD='bot-password' cargo run -p db --bin setup_bots
+```
+
 Defaults:
 
 - `BOT_COUNT=4`
@@ -29,12 +36,24 @@ You can set individual passwords if needed:
 BOT_COUNT=4 BOT1_PASSWORD='bot1-password' BOT2_PASSWORD='bot2-password' cargo run -p db --bin setup_bots
 ```
 
+Docker Compose:
+
+```bash
+docker compose exec app env BOT_COUNT=4 BOT1_PASSWORD='bot1-password' BOT2_PASSWORD='bot2-password' cargo run -p db --bin setup_bots
+```
+
 ## 2. Join Bots To A Tournament
 
 After the tournament exists, join the bots:
 
 ```bash
 TOURNAMENT_ID=LG2xvFdhFvb BOT_COUNT=4 cargo run -p db --bin join_bots_to_tournament
+```
+
+Docker Compose:
+
+```bash
+docker compose exec app env TOURNAMENT_ID=LG2xvFdhFvb BOT_COUNT=4 cargo run -p db --bin join_bots_to_tournament
 ```
 
 `TOURNAMENT_ID` can be the tournament nanoid or UUID.
@@ -67,6 +86,10 @@ Start one process per bot:
 ./scripts/bot_tournament_summary.py run bot3.json
 ./scripts/bot_tournament_summary.py run bot4.json
 ```
+
+When using Docker Compose, run the coordinator on the host. The app container
+publishes the API at `http://localhost:3000`, so keep that URL in each bot
+config file.
 
 The script logs in automatically, refreshes tokens before expiry, posts coordination heartbeats to tournament chat, and starts eligible games.
 
