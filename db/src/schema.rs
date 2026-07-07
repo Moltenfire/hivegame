@@ -306,24 +306,4 @@ diesel::joinable!(tournaments_users -> tournaments (tournament_id));
 diesel::joinable!(tournaments_users -> users (user_id));
 
 diesel::allow_tables_to_appear_in_same_query!(
-    challenges,
-    email_queue,
-    email_request_log,
-    email_state,
-    email_tokens,
-    game_hashes,
-    games,
-    games_users,
-    home_banner,
-    notification_preferences,
-    push_devices,
-    ratings,
-    schedules,
-    tournament_series,
-    tournament_series_organizers,
-    tournaments,
-    tournaments_invitations,
-    tournaments_organizers,
-    tournaments_users,
-    users,
-);
+    challenges,email_queue,email_request_log,email_state,email_tokens,game_hashes,games,games_users,home_banner,notification_preferences,push_devices,ratings,schedules,tournament_series,tournament_series_organizers,tournaments,tournaments_invitations,tournaments_organizers,tournaments_users,users,);
