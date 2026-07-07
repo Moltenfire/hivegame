@@ -22,6 +22,6 @@ RUN cargo binstall -y \
       cargo-leptos && \
     cargo install diesel_cli --no-default-features --features postgres -j $(nproc)
 
-RUN rustup target add wasm32-unknown-unknown
+RUN rustup target add --toolchain nightly wasm32-unknown-unknown
 
 WORKDIR /app
