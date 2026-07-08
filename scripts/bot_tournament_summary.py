@@ -445,6 +445,11 @@ def coord_json(message: dict[str, Any], now: dt.datetime) -> dict[str, Any] | No
     if not isinstance(payload, dict):
         return None
 
+    username = chat_message.get("username")
+    bot = payload.get("bot")
+    if not isinstance(username, str) or not isinstance(bot, str) or username != bot:
+        return None
+
     payload["_timestamp"] = parse_timestamp(chat_message.get("timestamp"), now)
     return payload
 
