@@ -272,6 +272,14 @@ def get_tournament_chat(auth: AuthSession, tournament_id: str) -> list[dict[str,
     return [message for message in messages if isinstance(message, dict)]
 
 
+def get_pending_games(auth: AuthSession) -> list[dict[str, Any]]:
+    data = api_request("GET", auth, "/api/v1/bot/games/pending")
+    games = data.get("games")
+    if not isinstance(games, list):
+        raise ApiError("API response did not include data.games as a list")
+    return [game for game in games if isinstance(game, dict)]
+
+
 def post_tournament_chat(
     auth: AuthSession, tournament_id: str, message: str
 ) -> None:
@@ -289,6 +297,15 @@ def start_game(auth: AuthSession, game_id_: str) -> dict[str, Any]:
         auth,
         "/api/v1/bot/games/control",
         {"game_id": game_id_, "control": "start"},
+    )
+
+
+def play_move(auth: AuthSession, game_id_: str, move: str) -> dict[str, Any]:
+    return api_request(
+        "POST",
+        auth,
+        "/api/v1/bot/games/play",
+        {"game_id": game_id_, "piece_pos": move},
     )
 
 
@@ -353,6 +370,60 @@ def player_name(game: dict[str, Any], color: str) -> str:
 
 def game_id(game: dict[str, Any]) -> str:
     return str(game.get("game_id", ""))
+
+
+def api_game_id(game: dict[str, Any]) -> str:
+    for key in ("game_id", "nanoid"):
+        value = game.get(key)
+        if isinstance(value, str) and value:
+            return value
+    return ""
+
+
+def moves_from_history(history: Any) -> list[str]:
+    if not isinstance(history, str) or not history.strip():
+        return []
+    return [move.strip() for move in history.replace(" ;", ";").split(";") if move.strip()]
+
+
+def moves_from_opening(opening: str) -> list[str]:
+    return moves_from_history(opening)
+
+
+def next_opening_move(game: dict[str, Any], opening: str) -> str | None:
+    opening_moves = moves_from_opening(opening)
+    if not opening_moves:
+        return None
+
+    history_moves = moves_from_history(game.get("history"))
+    if len(history_moves) >= len(opening_moves):
+        return None
+    if history_moves != opening_moves[: len(history_moves)]:
+        return None
+    return opening_moves[len(history_moves)]
+
+
+def opening_divergence(
+    game: dict[str, Any], opening: str
+) -> tuple[int, str | None, str | None] | None:
+    opening_moves = moves_from_opening(opening)
+    history_moves = moves_from_history(game.get("history"))
+    if not opening_moves:
+        return None
+
+    for index, actual in enumerate(history_moves):
+        if index >= len(opening_moves):
+            return None
+        expected = opening_moves[index]
+        if actual != expected:
+            return index, expected, actual
+    return None
+
+
+def opening_complete(game: dict[str, Any], opening: str) -> bool:
+    opening_moves = moves_from_opening(opening)
+    history_moves = moves_from_history(game.get("history"))
+    return bool(opening_moves) and history_moves[: len(opening_moves)] == opening_moves
 
 
 def natural_text_key(value: str) -> tuple[Any, ...]:
@@ -712,6 +783,56 @@ def tournament_games(tournament: dict[str, Any]) -> list[dict[str, Any]]:
     return [game for game in games if isinstance(game, dict)]
 
 
+def opening_map_for_tournament(tournament: dict[str, Any]) -> dict[str, str]:
+    games = sorted(tournament_games(tournament), key=game_sort_key)
+    openings = extract_openings(str(tournament.get("description") or ""))
+    return opening_by_game_id(games, openings)
+
+
+def play_pending_opening_moves(
+    auth: AuthSession,
+    tournament: dict[str, Any],
+    tournament_id: str,
+    bot_name: str,
+    focused_game_id: str,
+) -> bool:
+    assigned_openings = opening_map_for_tournament(tournament)
+    if not assigned_openings:
+        return False
+
+    for game in get_pending_games(auth):
+        gid = api_game_id(game)
+        if gid != focused_game_id:
+            continue
+        opening = assigned_openings.get(gid)
+        if not opening:
+            return False
+
+        divergence = opening_divergence(game, opening)
+        if divergence:
+            index, expected, actual = divergence
+            message = (
+                f"{bot_name} stopped playing {gid}: opening mismatch at move "
+                f"{index + 1}. Expected '{expected}', got '{actual}'."
+            )
+            print(message, flush=True)
+            post_tournament_chat(auth, tournament_id, message)
+            return False
+
+        if opening_complete(game, opening):
+            return False
+
+        move = next_opening_move(game, opening)
+        if not move:
+            return False
+
+        print(f"playing opening move for {gid}: {move}", flush=True)
+        play_move(auth, gid, move)
+        return True
+
+    return True
+
+
 def self_heartbeat(
     bot_name: str, tournament_id: str, state: str, game_id_: str | None
 ) -> dict[str, Any]:
@@ -731,9 +852,27 @@ def run_once(
     tournament_id: str,
     bot_name: str,
     last_heartbeat_at: dt.datetime | None,
-) -> dt.datetime | None:
+    focused_game_id: str | None,
+    stopped_playing: bool,
+) -> tuple[dt.datetime | None, str | None, bool]:
+    if focused_game_id and stopped_playing:
+        return last_heartbeat_at, focused_game_id, stopped_playing
+
     now = utc_now()
     tournament = get_tournament(auth, tournament_id)
+
+    if focused_game_id:
+        if not stopped_playing:
+            keep_playing = play_pending_opening_moves(
+                auth,
+                tournament,
+                tournament_id,
+                bot_name,
+                focused_game_id,
+            )
+            stopped_playing = not keep_playing
+        return last_heartbeat_at, focused_game_id, stopped_playing
+
     games = tournament_games(tournament)
     chat = get_tournament_chat(auth, tournament_id)
     messages = coord_messages(chat, tournament_id, now)
@@ -749,8 +888,9 @@ def run_once(
         messages.append(self_heartbeat(bot_name, tournament_id, state, state_game_id))
 
     heartbeats = latest_heartbeats(messages, utc_now())
+
     if state != "idle":
-        return last_heartbeat_at
+        return last_heartbeat_at, None, False
 
     incoming = sorted(
         [offer for offer in offers if offer.get("to") == bot_name],
@@ -796,10 +936,11 @@ def run_once(
             f"ready={outcome.get('ready')} started={outcome.get('started')}",
             flush=True,
         )
-        return last_heartbeat_at
+        print(f"focusing on {game_id(game)}; leaving chat coordination", flush=True)
+        return last_heartbeat_at, game_id(game), False
 
     if bot_unavailable(bot_name, games, heartbeats, offers):
-        return last_heartbeat_at
+        return last_heartbeat_at, None, False
 
     for game in eligible_games(games, heartbeats, offers):
         white, black = player_names(game)
@@ -814,15 +955,18 @@ def run_once(
             f"ready={outcome.get('ready')} started={outcome.get('started')}",
             flush=True,
         )
-        return last_heartbeat_at
+        print(f"focusing on {gid}; leaving chat coordination", flush=True)
+        return last_heartbeat_at, gid, False
 
-    return last_heartbeat_at
+    return last_heartbeat_at, None, False
 
 
 def run_coordinator(args: argparse.Namespace) -> int:
     auth = AuthSession(args.url, args.email, args.password)
     jitter = deterministic_jitter(args.bot_name)
     last_heartbeat_at: dt.datetime | None = None
+    focused_game_id: str | None = None
+    stopped_playing = False
     print(
         f"coordinating tournament {args.tournament_id} as {args.bot_name} "
         f"against {args.url.rstrip('/')} (poll {args.poll_seconds:g}s + {jitter:.2f}s jitter)",
@@ -831,11 +975,13 @@ def run_coordinator(args: argparse.Namespace) -> int:
     try:
         while True:
             try:
-                last_heartbeat_at = run_once(
+                last_heartbeat_at, focused_game_id, stopped_playing = run_once(
                     auth,
                     args.tournament_id,
                     args.bot_name,
                     last_heartbeat_at,
+                    focused_game_id,
+                    stopped_playing,
                 )
             except ApiError as exc:
                 print(f"warning: {exc}", file=sys.stderr, flush=True)

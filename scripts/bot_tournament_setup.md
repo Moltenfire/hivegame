@@ -93,6 +93,16 @@ config file.
 
 The script logs in automatically, refreshes tokens before expiry, posts coordination heartbeats to tournament chat, and starts eligible games.
 
+After this process starts or accepts a game, it leaves chat coordination and
+focuses only on that game. It polls the bot API until that game is returned as
+pending for this bot. If the game has an assigned opening from the tournament
+description, and the current history is still a prefix of that opening, the
+script submits the next opening move. It does not choose non-opening moves yet,
+and it does not post further coordination chat messages for that process. If
+the current game history differs from the assigned opening before the opening is
+complete, the bot posts one normal tournament chat message describing the
+mismatch and then stops polling or playing.
+
 To inspect one bot's assigned tournament games and openings:
 
 ```bash
