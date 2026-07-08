@@ -4,7 +4,10 @@ from __future__ import annotations
 import datetime as dt
 import hashlib
 import logging
-import time
+import signal
+from dataclasses import dataclass, field
+from enum import Enum
+from threading import Event
 from typing import Any
 
 from .api import (
@@ -47,6 +50,34 @@ from .uhp import UhpEngine
 from .time_utils import utc_now
 
 logger = logging.getLogger(__name__)
+
+
+class ShutdownMode(Enum):
+    RUNNING = "running"
+    DRAINING = "draining"
+    FORCE_EXIT = "force_exit"
+
+
+@dataclass
+class ShutdownController:
+    mode: ShutdownMode = ShutdownMode.RUNNING
+    event: Event = field(default_factory=Event)
+
+    @property
+    def draining(self) -> bool:
+        return self.mode == ShutdownMode.DRAINING
+
+    def request(self) -> None:
+        if self.mode == ShutdownMode.RUNNING:
+            self.mode = ShutdownMode.DRAINING
+            self.event.set()
+            return
+        self.mode = ShutdownMode.FORCE_EXIT
+        self.event.set()
+        raise KeyboardInterrupt
+
+    def wait(self, seconds: float) -> None:
+        self.event.wait(seconds)
 
 
 def in_progress_game_for(
@@ -364,6 +395,7 @@ def run_once(
     focused_game_id: str | None,
     stopped_playing: bool,
     engine: UhpEngine | None,
+    draining: bool = False,
 ) -> tuple[dt.datetime | None, str | None, bool, bool]:
     now = utc_now()
     tournament = get_tournament(auth, tournament_config.tournament_id)
@@ -376,24 +408,36 @@ def run_once(
     if focused_game_id:
         focused_game = focused_tournament_game(tournament, focused_game_id)
         if not focused_game:
-            logger.info("%s no longer found; returning to coordination", focused_game_id)
             if engine:
                 engine.clear_game()
+            if draining:
+                logger.info("%s no longer found; exiting after shutdown request", focused_game_id)
+                return last_heartbeat_at, None, False, True
+            logger.info("%s no longer found; returning to coordination", focused_game_id)
             if not unfinished_games_for(games, bot_name):
                 logger.info("%s has completed all tournament games; exiting", bot_name)
                 return last_heartbeat_at, None, False, True
             post_heartbeat(auth, tournament_config.tournament_id, bot_name, "idle", None)
             return utc_now(), None, False, False
         elif focused_game.get("finished", False):
-            logger.info("%s finished; returning to coordination", focused_game_id)
             if engine:
                 engine.clear_game()
+            if draining:
+                logger.info("%s finished; exiting after shutdown request", focused_game_id)
+                return last_heartbeat_at, None, False, True
+            logger.info("%s finished; returning to coordination", focused_game_id)
             if not unfinished_games_for(games, bot_name):
                 logger.info("%s has completed all tournament games; exiting", bot_name)
                 return last_heartbeat_at, None, False, True
             post_heartbeat(auth, tournament_config.tournament_id, bot_name, "idle", None)
             return utc_now(), None, False, False
         elif stopped_playing:
+            if draining:
+                logger.info(
+                    "shutdown requested but %s is no longer being played; exiting",
+                    focused_game_id,
+                )
+                return last_heartbeat_at, None, stopped_playing, True
             return last_heartbeat_at, focused_game_id, stopped_playing, False
         else:
             keep_playing = play_pending_opening_moves(
@@ -419,6 +463,10 @@ def run_once(
             engine,
         )
         return last_heartbeat_at, resumed_game_id, not keep_playing, False
+
+    if draining:
+        logger.info("shutdown requested while idle; exiting")
+        return last_heartbeat_at, None, False, True
 
     chat = get_tournament_chat(auth, tournament_config.tournament_id)
     messages = coord_messages(chat, tournament_config.tournament_id, now)
@@ -522,11 +570,19 @@ def run_coordinator(
     auth = AuthSession(tournament_config.url, bot_config.email, bot_config.password)
     if engine:
         engine.start()
+    shutdown = ShutdownController()
+
+    def handle_sigint(_signum: int, _frame: Any) -> None:
+        shutdown.request()
+
+    previous_sigint = signal.getsignal(signal.SIGINT)
+    signal.signal(signal.SIGINT, handle_sigint)
     jitter = deterministic_jitter(bot_config.name, tournament_config.poll_jitter_seconds)
     last_heartbeat_at: dt.datetime | None = None
     focused_game_id: str | None = None
     stopped_playing = False
     completed = False
+    announced_drain = False
     logger.info(
         "coordinating tournament %s as %s against %s (poll %gs + %.2fs jitter)",
         tournament_config.tournament_id,
@@ -551,15 +607,30 @@ def run_coordinator(
                     focused_game_id,
                     stopped_playing,
                     engine,
+                    shutdown.draining,
                 )
             except ApiError as exc:
                 logger.warning("%s", exc)
             if completed:
                 break
-            time.sleep(max(0.5, tournament_config.poll_seconds + jitter))
+            if shutdown.draining and not focused_game_id:
+                logger.info("shutdown requested while idle; exiting")
+                break
+            if shutdown.draining and stopped_playing:
+                logger.info("shutdown requested but current game is stopped; exiting")
+                break
+            if shutdown.draining and not announced_drain:
+                logger.info(
+                    "shutdown requested; finishing %s then exiting",
+                    focused_game_id,
+                )
+                announced_drain = True
+            shutdown.wait(max(0.5, tournament_config.poll_seconds + jitter))
     except KeyboardInterrupt:
-        logger.info("stopped")
+        logger.info("second shutdown request received; exiting immediately")
         return 0
     finally:
+        signal.signal(signal.SIGINT, previous_sigint)
         if engine:
             engine.close()
+    return 0

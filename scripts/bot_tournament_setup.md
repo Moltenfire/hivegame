@@ -166,6 +166,11 @@ tournament config file.
 The script logs in automatically, refreshes tokens before expiry, posts
 coordination heartbeats to tournament chat, and starts eligible games.
 
+Press `Ctrl+C` once to request a graceful shutdown. If the bot is idle, it exits
+immediately. If it is playing a game, it stops coordinating new games, finishes
+the focused game, and then exits. Press `Ctrl+C` a second time to exit
+immediately.
+
 After this process starts or accepts a game, it leaves chat coordination and
 focuses only on that game. On restart, if the tournament already has an
 unfinished in-progress game assigned to this bot, the process resumes that game

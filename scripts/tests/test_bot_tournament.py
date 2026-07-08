@@ -19,7 +19,13 @@ from bot_tournament.config import (
     load_bot_config,
     load_tournament_config,
 )
-from bot_tournament.coordination import eligible_games, run_once, unfinished_games_for
+from bot_tournament.coordination import (
+    ShutdownController,
+    ShutdownMode,
+    eligible_games,
+    run_once,
+    unfinished_games_for,
+)
 from bot_tournament.openings import extract_openings, next_opening_move, opening_divergence
 from bot_tournament.uhp import bestmove_command_for_game
 
@@ -110,6 +116,58 @@ class CoordinationTests(unittest.TestCase):
                 None,
                 False,
                 None,
+            )
+        self.assertEqual(result, (None, None, False, True))
+        chat.assert_not_called()
+
+    def test_shutdown_controller_drains_then_forces_exit(self) -> None:
+        shutdown = ShutdownController()
+        shutdown.request()
+        self.assertEqual(shutdown.mode, ShutdownMode.DRAINING)
+        self.assertTrue(shutdown.event.is_set())
+        with self.assertRaises(KeyboardInterrupt):
+            shutdown.request()
+        self.assertEqual(shutdown.mode, ShutdownMode.FORCE_EXIT)
+
+    def test_run_once_draining_exits_finished_focused_game_without_heartbeat(self) -> None:
+        finished = game("g1", "Bot1", "Bot2", "InProgress")
+        finished["finished"] = True
+        tournament_config = TournamentConfig(url="http://localhost:3000", tournament_id="T")
+        engine = Mock()
+        with patch(
+            "bot_tournament.coordination.get_tournament",
+            return_value={"games": [finished]},
+        ), patch("bot_tournament.coordination.post_heartbeat") as heartbeat:
+            result = run_once(
+                Mock(),
+                tournament_config,
+                "Bot1",
+                None,
+                "g1",
+                False,
+                engine,
+                True,
+            )
+        self.assertEqual(result, (None, None, False, True))
+        engine.clear_game.assert_called_once()
+        heartbeat.assert_not_called()
+
+    def test_run_once_draining_idle_exits_without_reading_chat(self) -> None:
+        pending = game("g1", "Bot1", "Bot2")
+        tournament_config = TournamentConfig(url="http://localhost:3000", tournament_id="T")
+        with patch(
+            "bot_tournament.coordination.get_tournament",
+            return_value={"games": [pending]},
+        ), patch("bot_tournament.coordination.get_tournament_chat") as chat:
+            result = run_once(
+                Mock(),
+                tournament_config,
+                "Bot1",
+                None,
+                None,
+                False,
+                None,
+                True,
             )
         self.assertEqual(result, (None, None, False, True))
         chat.assert_not_called()
