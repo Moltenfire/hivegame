@@ -73,6 +73,9 @@ Create local config files, one per bot. Do not commit real credentials.
   "password": "bot-password",
   "uhp": {
     "command": "/home/jondav01/scratch/nokamute/target/release/nokamute uhp",
+    "options": {
+      "NumThreads": 1
+    },
     "bestmove": {
       "mode": "depth",
       "depth": 1
@@ -87,7 +90,10 @@ string, for example `"'/path with spaces/engine' uhp"`.
 
 The `uhp` section is optional. Without it, the coordinator starts games and
 plays assigned opening moves only. With it, the coordinator starts the UHP
-process once when the bot runner starts. For each focused game it sends one
+process once when the bot runner starts, applies configured UHP options with
+`options set <Name> <Value>`, then keeps that engine process for subsequent
+games. For `nokamute`, set `"NumThreads": 1` to avoid one bot using all
+available cores. For each focused game it sends one
 `newgame <GameTypeString>`, catches the engine up with `play <MoveString>` for
 any existing API history, and then asks the engine for a move when the focused
 game is pending for that bot. After a submitted move is accepted by the API, the
@@ -152,7 +158,10 @@ the configured UHP engine for moves. It does not post further coordination chat
 messages for that process. If the current game history differs from the
 assigned opening before the opening is complete, or if the UHP engine errors or
 submits a rejected move, the bot posts one normal tournament chat message
-describing the issue and then stops playing that game.
+describing the issue and then stops playing that game. When the focused game
+finishes, including by timeout, the process clears its local UHP game state,
+posts a fresh idle heartbeat, and then returns to tournament coordination on
+the next poll.
 
 To inspect one bot's assigned tournament games and openings:
 

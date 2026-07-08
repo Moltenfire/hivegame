@@ -117,6 +117,19 @@ def apply_config(args: argparse.Namespace) -> argparse.Namespace:
             raise ConfigError("Config field uhp.bestmove must be an object")
         validate_uhp_bestmove_config(bestmove)
         args.uhp["bestmove"] = bestmove
+        options = args.uhp.get("options", {})
+        if not isinstance(options, dict):
+            raise ConfigError("Config field uhp.options must be an object")
+        for name, value in options.items():
+            if not isinstance(name, str) or not name or " " in name or ";" in name:
+                raise ConfigError("Config field uhp.options keys must be option names")
+            if not isinstance(value, (str, int, float, bool)):
+                raise ConfigError(f"Config field uhp.options.{name} must be a scalar value")
+            if isinstance(value, str) and any(char.isspace() for char in value):
+                raise ConfigError(
+                    f"Config field uhp.options.{name} must not contain whitespace"
+                )
+        args.uhp["options"] = options
     return args
 
 
@@ -186,6 +199,12 @@ def validate_uhp_bestmove_config(config: dict[str, Any]) -> None:
         raise ConfigError(f"Unsupported config field uhp.bestmove.protocol: {protocol}")
 
 
+def uhp_option_value(value: str | int | float | bool) -> str:
+    if isinstance(value, bool):
+        return "True" if value else "False"
+    return str(value)
+
+
 def current_player_time_left_seconds(game: dict[str, Any]) -> float | None:
     current = str(game.get("current_player_id") or "")
     white_id = str(game.get("white_id") or "")
@@ -249,6 +268,7 @@ class UhpEngine:
     def __init__(self, config: dict[str, Any], bot_name: str) -> None:
         self.command = str(config["command"])
         self.bestmove_config = config.get("bestmove", {"mode": "depth", "depth": 1})
+        self.options = config.get("options", {})
         self.bot_name = bot_name
         self.proc: subprocess.Popen[str] | None = None
         self.active_game_id: str | None = None
@@ -271,7 +291,13 @@ class UhpEngine:
             raise UhpError(f"Could not start UHP engine for {self.bot_name}: {exc}") from exc
 
         self._read_until_ok()
+        self.configure_options()
         print(f"started UHP engine for {self.bot_name}: {self.command}", flush=True)
+
+    def configure_options(self) -> None:
+        for name, value in self.options.items():
+            self.command_io(f"options set {name} {uhp_option_value(value)}")
+            print(f"set UHP option for {self.bot_name}: {name}={value}", flush=True)
 
     def close(self) -> None:
         if self.proc is None:
@@ -282,6 +308,11 @@ class UhpEngine:
         except subprocess.TimeoutExpired:
             self.proc.kill()
         self.proc = None
+
+    def clear_game(self) -> None:
+        self.active_game_id = None
+        self.active_game_type = None
+        self.synced_moves = []
 
     def _read_until_ok(self) -> list[str]:
         if self.proc is None or self.proc.stdout is None:
@@ -1248,14 +1279,27 @@ def run_once(
     stopped_playing: bool,
     engine: UhpEngine | None,
 ) -> tuple[dt.datetime | None, str | None, bool]:
-    if focused_game_id and stopped_playing:
-        return last_heartbeat_at, focused_game_id, stopped_playing
-
     now = utc_now()
     tournament = get_tournament(auth, tournament_id)
+    games = tournament_games(tournament)
 
     if focused_game_id:
-        if not stopped_playing:
+        focused_game = focused_tournament_game(tournament, focused_game_id)
+        if not focused_game:
+            print(f"{focused_game_id} no longer found; returning to coordination", flush=True)
+            if engine:
+                engine.clear_game()
+            post_heartbeat(auth, tournament_id, bot_name, "idle", None)
+            return utc_now(), None, False
+        elif focused_game.get("finished", False):
+            print(f"{focused_game_id} finished; returning to coordination", flush=True)
+            if engine:
+                engine.clear_game()
+            post_heartbeat(auth, tournament_id, bot_name, "idle", None)
+            return utc_now(), None, False
+        elif stopped_playing:
+            return last_heartbeat_at, focused_game_id, stopped_playing
+        else:
             keep_playing = play_pending_opening_moves(
                 auth,
                 tournament,
@@ -1264,10 +1308,8 @@ def run_once(
                 focused_game_id,
                 engine,
             )
-            stopped_playing = not keep_playing
-        return last_heartbeat_at, focused_game_id, stopped_playing
+            return last_heartbeat_at, focused_game_id, not keep_playing
 
-    games = tournament_games(tournament)
     resumed_game = in_progress_game_for(games, bot_name)
     if resumed_game:
         resumed_game_id = game_id(resumed_game)
