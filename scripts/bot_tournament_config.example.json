@@ -1,0 +1,21 @@
+{
+  "name": "Bot1",
+  "email": "bot1@example.com",
+  "password": "replace-me",
+  "logging": {
+    "level": "INFO",
+    "directory": "logs",
+    "app_file": true,
+    "uhp_file": true
+  },
+  "uhp": {
+    "command": "/home/jondav01/scratch/nokamute/target/release/nokamute uhp",
+    "options": {
+      "NumThreads": 1
+    },
+    "bestmove": {
+      "mode": "depth",
+      "depth": 1
+    }
+  }
+}
