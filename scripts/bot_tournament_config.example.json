@@ -6,6 +6,9 @@
   "password": "replace-me",
   "uhp": {
     "command": "/home/jondav01/scratch/nokamute/target/release/nokamute uhp",
+    "options": {
+      "NumThreads": 1
+    },
     "bestmove": {
       "mode": "depth",
       "depth": 1
