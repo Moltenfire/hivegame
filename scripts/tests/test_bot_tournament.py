@@ -6,14 +6,20 @@ import os
 import sys
 import tempfile
 import unittest
+from unittest.mock import Mock, patch
 
 SCRIPT_DIR = os.path.dirname(os.path.dirname(__file__))
 if SCRIPT_DIR not in sys.path:
     sys.path.insert(0, SCRIPT_DIR)
 
 from bot_tournament.chat_protocol import coord_json, coord_message, latest_heartbeats
-from bot_tournament.config import ConfigError, load_bot_config, load_tournament_config
-from bot_tournament.coordination import eligible_games
+from bot_tournament.config import (
+    ConfigError,
+    TournamentConfig,
+    load_bot_config,
+    load_tournament_config,
+)
+from bot_tournament.coordination import eligible_games, run_once, unfinished_games_for
 from bot_tournament.openings import extract_openings, next_opening_move, opening_divergence
 from bot_tournament.uhp import bestmove_command_for_game
 
@@ -74,6 +80,39 @@ class CoordinationTests(unittest.TestCase):
             [item["game_id"] for item in eligible_games(games, heartbeats, [])],
             ["g1"],
         )
+
+    def test_unfinished_games_for_only_counts_assigned_unfinished_games(self) -> None:
+        finished = game("g1", "Bot1", "Bot2")
+        finished["finished"] = True
+        unfinished = game("g2", "Bot1", "Bot3")
+        other = game("g3", "Bot4", "Bot5")
+        self.assertEqual(
+            [
+                item["game_id"]
+                for item in unfinished_games_for([finished, unfinished, other], "Bot1")
+            ],
+            ["g2"],
+        )
+
+    def test_run_once_exits_when_all_assigned_games_are_finished(self) -> None:
+        finished = game("g1", "Bot1", "Bot2")
+        finished["finished"] = True
+        tournament_config = TournamentConfig(url="http://localhost:3000", tournament_id="T")
+        with patch(
+            "bot_tournament.coordination.get_tournament",
+            return_value={"games": [finished]},
+        ), patch("bot_tournament.coordination.get_tournament_chat") as chat:
+            result = run_once(
+                Mock(),
+                tournament_config,
+                "Bot1",
+                None,
+                None,
+                False,
+                None,
+            )
+        self.assertEqual(result, (None, None, False, True))
+        chat.assert_not_called()
 
 
 class OpeningTests(unittest.TestCase):

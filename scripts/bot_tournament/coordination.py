@@ -67,6 +67,19 @@ def in_progress_game_for(
     return sorted(matches, key=game_sort_key)[0]
 
 
+def unfinished_games_for(games: list[dict[str, Any]], bot_name: str) -> list[dict[str, Any]]:
+    return sorted(
+        [
+            game
+            for game in games
+            if isinstance(game, dict)
+            and not game.get("finished", False)
+            and player_in_game(game, bot_name)
+        ],
+        key=game_sort_key,
+    )
+
+
 def offer_players(offer: dict[str, Any]) -> set[str]:
     return {str(offer.get("bot", "")), str(offer.get("to", ""))}
 
@@ -351,10 +364,14 @@ def run_once(
     focused_game_id: str | None,
     stopped_playing: bool,
     engine: UhpEngine | None,
-) -> tuple[dt.datetime | None, str | None, bool]:
+) -> tuple[dt.datetime | None, str | None, bool, bool]:
     now = utc_now()
     tournament = get_tournament(auth, tournament_config.tournament_id)
     games = tournament_games(tournament)
+
+    if not focused_game_id and not unfinished_games_for(games, bot_name):
+        logger.info("%s has completed all tournament games; exiting", bot_name)
+        return last_heartbeat_at, None, False, True
 
     if focused_game_id:
         focused_game = focused_tournament_game(tournament, focused_game_id)
@@ -362,16 +379,22 @@ def run_once(
             logger.info("%s no longer found; returning to coordination", focused_game_id)
             if engine:
                 engine.clear_game()
+            if not unfinished_games_for(games, bot_name):
+                logger.info("%s has completed all tournament games; exiting", bot_name)
+                return last_heartbeat_at, None, False, True
             post_heartbeat(auth, tournament_config.tournament_id, bot_name, "idle", None)
-            return utc_now(), None, False
+            return utc_now(), None, False, False
         elif focused_game.get("finished", False):
             logger.info("%s finished; returning to coordination", focused_game_id)
             if engine:
                 engine.clear_game()
+            if not unfinished_games_for(games, bot_name):
+                logger.info("%s has completed all tournament games; exiting", bot_name)
+                return last_heartbeat_at, None, False, True
             post_heartbeat(auth, tournament_config.tournament_id, bot_name, "idle", None)
-            return utc_now(), None, False
+            return utc_now(), None, False, False
         elif stopped_playing:
-            return last_heartbeat_at, focused_game_id, stopped_playing
+            return last_heartbeat_at, focused_game_id, stopped_playing, False
         else:
             keep_playing = play_pending_opening_moves(
                 auth,
@@ -381,7 +404,7 @@ def run_once(
                 focused_game_id,
                 engine,
             )
-            return last_heartbeat_at, focused_game_id, not keep_playing
+            return last_heartbeat_at, focused_game_id, not keep_playing, False
 
     resumed_game = in_progress_game_for(games, bot_name)
     if resumed_game:
@@ -395,7 +418,7 @@ def run_once(
             resumed_game_id,
             engine,
         )
-        return last_heartbeat_at, resumed_game_id, not keep_playing
+        return last_heartbeat_at, resumed_game_id, not keep_playing, False
 
     chat = get_tournament_chat(auth, tournament_config.tournament_id)
     messages = coord_messages(chat, tournament_config.tournament_id, now)
@@ -423,7 +446,7 @@ def run_once(
     heartbeats = latest_heartbeats(messages, tournament_config.online_seconds, utc_now())
 
     if state != "idle":
-        return last_heartbeat_at, None, False
+        return last_heartbeat_at, None, False, False
 
     incoming = sorted(
         [offer for offer in offers if offer.get("to") == bot_name],
@@ -468,10 +491,10 @@ def run_once(
             outcome.get("started"),
         )
         logger.info("focusing on %s; leaving chat coordination", game_id(game))
-        return last_heartbeat_at, game_id(game), False
+        return last_heartbeat_at, game_id(game), False, False
 
     if bot_unavailable(bot_name, games, heartbeats, offers):
-        return last_heartbeat_at, None, False
+        return last_heartbeat_at, None, False, False
 
     for game in eligible_games(games, heartbeats, offers):
         white, black = player_names(game)
@@ -488,9 +511,9 @@ def run_once(
             outcome.get("started"),
         )
         logger.info("focusing on %s; leaving chat coordination", gid)
-        return last_heartbeat_at, gid, False
+        return last_heartbeat_at, gid, False, False
 
-    return last_heartbeat_at, None, False
+    return last_heartbeat_at, None, False, False
 
 
 def run_coordinator(
@@ -503,6 +526,7 @@ def run_coordinator(
     last_heartbeat_at: dt.datetime | None = None
     focused_game_id: str | None = None
     stopped_playing = False
+    completed = False
     logger.info(
         "coordinating tournament %s as %s against %s (poll %gs + %.2fs jitter)",
         tournament_config.tournament_id,
@@ -512,9 +536,14 @@ def run_coordinator(
         jitter,
     )
     try:
-        while True:
+        while not completed:
             try:
-                last_heartbeat_at, focused_game_id, stopped_playing = run_once(
+                (
+                    last_heartbeat_at,
+                    focused_game_id,
+                    stopped_playing,
+                    completed,
+                ) = run_once(
                     auth,
                     tournament_config,
                     bot_config.name,
@@ -525,6 +554,8 @@ def run_coordinator(
                 )
             except ApiError as exc:
                 logger.warning("%s", exc)
+            if completed:
+                break
             time.sleep(max(0.5, tournament_config.poll_seconds + jitter))
     except KeyboardInterrupt:
         logger.info("stopped")
