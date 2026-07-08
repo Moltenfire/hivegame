@@ -104,6 +104,8 @@ async fn play_move(
     };
 
     let played_turn = Turn::Move(piece, position);
+    let bot_id = bot.id;
+    let bot_username = bot.username.clone();
 
     let (game, played_turn_out) = conn
         .transaction::<_, anyhow::Error, _>(move |tc| {
@@ -112,8 +114,8 @@ async fn play_move(
                     log::warn!(
                         "invalid bot turn game={} bot={} bot_username={} db_turn={} request_turn={} error={} board=\n{}",
                         game.nanoid,
-                        bot.id,
-                        bot.username,
+                        bot_id,
+                        bot_username,
                         game.turn,
                         played_turn,
                         err,
@@ -122,14 +124,13 @@ async fn play_move(
                     return Err(err.into());
                 }
                 let updated_game = game.update_gamestate(&state, 0_f64, tc).await?;
-                send_turn_messages(hub.clone(), &updated_game, &bot, &pool, played_turn.clone())
-                    .await?;
 
                 Ok((updated_game, played_turn))
             }
             .scope_boxed()
         })
         .await?;
+    send_turn_messages(hub.clone(), &game, &bot, &pool, played_turn_out.clone()).await?;
     Ok((game, played_turn_out))
 }
 

@@ -260,7 +260,6 @@ pub fn Play() -> impl IntoView {
                         GameReaction::Turn(turn) => {
                             timer.update_from(&gar.game);
                             game_state.clear_gc();
-                            game_state.set_game_response(gar.game.clone());
                             sounds.play_sound(SoundType::Turn);
                             let (pos, reserve_pos, history_moves, active, was_at_live_edge) =
                                 game_state.signal.with_untracked(|gs| {
@@ -273,9 +272,9 @@ pub fn Play() -> impl IntoView {
                                     )
                                 });
                             if history_moves != gar.game.history {
+                                reset_game_state(&gar.game, game_state);
                                 match turn {
-                                    Turn::Move(piece, position) => {
-                                        game_state.play_turn(piece, position);
+                                    Turn::Move(_, _) => {
                                         if was_at_live_edge {
                                             game_state.view_game();
                                             sync_play_move_query(game_state, &set_move);
