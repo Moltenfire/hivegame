@@ -6,6 +6,8 @@ import datetime as dt
 import hashlib
 import json
 import re
+import shlex
+import subprocess
 import sys
 import time
 from typing import Any
@@ -26,6 +28,10 @@ class ApiError(Exception):
 
 
 class ConfigError(Exception):
+    pass
+
+
+class UhpError(Exception):
     pass
 
 
@@ -83,6 +89,7 @@ def apply_config(args: argparse.Namespace) -> argparse.Namespace:
     args.bot_name = config.get("name")
     args.email = config.get("email")
     args.password = config.get("password")
+    args.uhp = config.get("uhp")
 
     required = {
         "url": args.url,
@@ -94,6 +101,22 @@ def apply_config(args: argparse.Namespace) -> argparse.Namespace:
     missing = [key for key, value in required.items() if not isinstance(value, str) or not value]
     if missing:
         raise ConfigError(f"Config missing required string field(s): {', '.join(missing)}")
+    if args.uhp is not None:
+        if not isinstance(args.uhp, dict):
+            raise ConfigError("Config field uhp must be an object")
+        command = args.uhp.get("command")
+        if not isinstance(command, str) or not command:
+            raise ConfigError("Config field uhp.command must be a non-empty string")
+        try:
+            if not shlex.split(command):
+                raise ConfigError("Config field uhp.command must include a command")
+        except ValueError as exc:
+            raise ConfigError(f"Config field uhp.command is not valid shell syntax: {exc}") from exc
+        bestmove = args.uhp.get("bestmove", {"mode": "depth", "depth": 1})
+        if not isinstance(bestmove, dict):
+            raise ConfigError("Config field uhp.bestmove must be an object")
+        validate_uhp_bestmove_config(bestmove)
+        args.uhp["bestmove"] = bestmove
     return args
 
 
@@ -109,6 +132,233 @@ def decode_jwt_exp(token: str) -> int | None:
         return None
     exp = claims.get("exp")
     return exp if isinstance(exp, int) else None
+
+
+def format_hhmmss(seconds: float) -> str:
+    total = max(1, int(round(seconds)))
+    hours, remainder = divmod(total, 3600)
+    minutes, seconds = divmod(remainder, 60)
+    return f"{hours:02}:{minutes:02}:{seconds:02}"
+
+
+def positive_int(value: Any, field: str) -> int:
+    try:
+        parsed = int(value)
+    except (TypeError, ValueError) as exc:
+        raise ConfigError(f"Config field {field} must be a positive integer") from exc
+    if parsed <= 0:
+        raise ConfigError(f"Config field {field} must be a positive integer")
+    return parsed
+
+
+def positive_float(value: Any, field: str) -> float:
+    try:
+        parsed = float(value)
+    except (TypeError, ValueError) as exc:
+        raise ConfigError(f"Config field {field} must be a positive number") from exc
+    if parsed <= 0:
+        raise ConfigError(f"Config field {field} must be a positive number")
+    return parsed
+
+
+def validate_uhp_bestmove_config(config: dict[str, Any]) -> None:
+    mode = str(config.get("mode", "depth"))
+    if mode == "depth":
+        positive_int(config.get("depth", 1), "uhp.bestmove.depth")
+        return
+
+    if mode != "time":
+        raise ConfigError(f"Unsupported config field uhp.bestmove.mode: {mode}")
+
+    positive_float(config.get("seconds", 5), "uhp.bestmove.seconds")
+    positive_float(config.get("min_seconds", 1), "uhp.bestmove.min_seconds")
+    positive_float(
+        config.get("max_seconds", config.get("seconds", 5)),
+        "uhp.bestmove.max_seconds",
+    )
+    positive_int(config.get("moves_to_go", 20), "uhp.bestmove.moves_to_go")
+    positive_float(
+        config.get("max_clock_fraction", 0.5),
+        "uhp.bestmove.max_clock_fraction",
+    )
+    protocol = str(config.get("protocol", "time"))
+    if protocol not in {"time", "seconds"}:
+        raise ConfigError(f"Unsupported config field uhp.bestmove.protocol: {protocol}")
+
+
+def current_player_time_left_seconds(game: dict[str, Any]) -> float | None:
+    current = str(game.get("current_player_id") or "")
+    white_id = str(game.get("white_id") or "")
+    black_id = str(game.get("black_id") or "")
+    if current and current == white_id:
+        raw = game.get("white_time_left")
+    elif current and current == black_id:
+        raw = game.get("black_time_left")
+    else:
+        turn = game.get("turn")
+        raw = (
+            game.get("white_time_left")
+            if isinstance(turn, int) and turn % 2 == 0
+            else game.get("black_time_left")
+        )
+
+    if isinstance(raw, (int, float)) and raw > 0:
+        return float(raw) / 1_000_000_000
+    return None
+
+
+def bestmove_command_for_game(game: dict[str, Any], config: dict[str, Any]) -> str:
+    mode = str(config.get("mode", "depth"))
+    if mode == "depth":
+        depth = positive_int(config.get("depth", 1), "uhp.bestmove.depth")
+        return f"bestmove depth {depth}"
+
+    if mode != "time":
+        raise UhpError(f"Unsupported uhp.bestmove.mode: {mode}")
+
+    fallback_seconds = positive_float(config.get("seconds", 5), "uhp.bestmove.seconds")
+    seconds = fallback_seconds
+    if config.get("use_clock", False):
+        remaining = current_player_time_left_seconds(game)
+        if remaining is not None:
+            moves_to_go = positive_int(
+                config.get("moves_to_go", 20), "uhp.bestmove.moves_to_go"
+            )
+            seconds = remaining / moves_to_go
+            max_fraction = positive_float(
+                config.get("max_clock_fraction", 0.5),
+                "uhp.bestmove.max_clock_fraction",
+            )
+            seconds = min(seconds, remaining * max_fraction)
+
+    min_seconds = positive_float(config.get("min_seconds", 1), "uhp.bestmove.min_seconds")
+    max_seconds = positive_float(
+        config.get("max_seconds", fallback_seconds), "uhp.bestmove.max_seconds"
+    )
+    seconds = max(min_seconds, min(seconds, max_seconds))
+
+    protocol = str(config.get("protocol", "time"))
+    if protocol == "seconds":
+        return f"bestmove seconds {seconds:g}"
+    if protocol == "time":
+        return f"bestmove time {format_hhmmss(seconds)}"
+    raise UhpError(f"Unsupported uhp.bestmove.protocol: {protocol}")
+
+
+class UhpEngine:
+    def __init__(self, config: dict[str, Any], bot_name: str) -> None:
+        self.command = str(config["command"])
+        self.bestmove_config = config.get("bestmove", {"mode": "depth", "depth": 1})
+        self.bot_name = bot_name
+        self.proc: subprocess.Popen[str] | None = None
+        self.active_game_id: str | None = None
+        self.active_game_type: str | None = None
+        self.synced_moves: list[str] = []
+
+    def start(self) -> None:
+        if self.proc is not None:
+            return
+        try:
+            self.proc = subprocess.Popen(
+                shlex.split(self.command),
+                stdin=subprocess.PIPE,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.DEVNULL,
+                text=True,
+                bufsize=1,
+            )
+        except OSError as exc:
+            raise UhpError(f"Could not start UHP engine for {self.bot_name}: {exc}") from exc
+
+        self._read_until_ok()
+        print(f"started UHP engine for {self.bot_name}: {self.command}", flush=True)
+
+    def close(self) -> None:
+        if self.proc is None:
+            return
+        self.proc.terminate()
+        try:
+            self.proc.wait(timeout=2)
+        except subprocess.TimeoutExpired:
+            self.proc.kill()
+        self.proc = None
+
+    def _read_until_ok(self) -> list[str]:
+        if self.proc is None or self.proc.stdout is None:
+            raise UhpError("UHP engine is not running")
+        lines: list[str] = []
+        while True:
+            line = self.proc.stdout.readline()
+            if line == "":
+                raise UhpError("UHP engine closed stdout")
+            stripped = line.strip()
+            if stripped == "ok":
+                return lines
+            if stripped.startswith("err ") or stripped.startswith("invalidmove "):
+                raise UhpError(stripped)
+            if stripped:
+                lines.append(stripped)
+
+    def command_io(self, command: str) -> list[str]:
+        self.start()
+        if self.proc is None or self.proc.stdin is None:
+            raise UhpError("UHP engine stdin is not available")
+        self.proc.stdin.write(f"{command}\n")
+        self.proc.stdin.flush()
+        return self._read_until_ok()
+
+    def begin_game(self, game: dict[str, Any]) -> None:
+        gid = api_game_id(game)
+        game_type = game_type_for_uhp(game.get("game_type"))
+        self.command_io(f"newgame {game_type}")
+        self.active_game_id = gid
+        self.active_game_type = game_type
+        self.synced_moves = []
+
+    def sync_to_game(self, game: dict[str, Any]) -> None:
+        gid = api_game_id(game)
+        game_type = game_type_for_uhp(game.get("game_type"))
+        if self.active_game_id is None:
+            self.begin_game(game)
+        elif self.active_game_id != gid:
+            raise UhpError(
+                f"UHP engine is already tracking {self.active_game_id}, not {gid}"
+            )
+        elif self.active_game_type != game_type:
+            raise UhpError(
+                f"UHP game type changed from {self.active_game_type} to {game_type}"
+            )
+
+        api_moves = moves_from_history(game.get("history"))
+        if api_moves[: len(self.synced_moves)] != self.synced_moves:
+            raise UhpError("UHP engine history no longer matches API history")
+        for move in api_moves[len(self.synced_moves) :]:
+            self.command_io(f"play {move}")
+            self.synced_moves.append(move)
+
+    def record_accepted_move(
+        self, game_id_: str, move: str, authoritative_history: Any = None
+    ) -> None:
+        if self.active_game_id != game_id_:
+            return
+        self.command_io(f"play {move}")
+        api_moves = moves_from_history(authoritative_history)
+        if api_moves:
+            if len(api_moves) < len(self.synced_moves):
+                raise UhpError("API history moved backwards after accepted move")
+            if len(api_moves) > len(self.synced_moves) + 1:
+                raise UhpError("API history advanced by more than one move after accepted move")
+            self.synced_moves = api_moves
+        else:
+            self.synced_moves.append(move)
+
+    def bestmove(self, game: dict[str, Any]) -> str:
+        self.sync_to_game(game)
+        output = self.command_io(bestmove_command_for_game(game, self.bestmove_config))
+        candidates = [line for line in output if not line.startswith("stats ")]
+        if not candidates:
+            raise UhpError("UHP engine returned no bestmove")
+        return candidates[-1].rstrip(";")
 
 
 class AuthSession:
@@ -368,6 +618,12 @@ def player_name(game: dict[str, Any], color: str) -> str:
     return str(player.get("username", ""))
 
 
+def player_uid(game: dict[str, Any], color: str) -> str:
+    player = game.get(f"{color}_player") or {}
+    value = player.get("uid")
+    return str(value) if value else ""
+
+
 def game_id(game: dict[str, Any]) -> str:
     return str(game.get("game_id", ""))
 
@@ -388,6 +644,49 @@ def moves_from_history(history: Any) -> list[str]:
 
 def moves_from_opening(opening: str) -> list[str]:
     return moves_from_history(opening)
+
+
+def game_type_for_uhp(value: Any) -> str:
+    game_type = str(value or "Base")
+    if game_type == "Base" or game_type.startswith("Base+"):
+        return game_type
+    return f"Base+{game_type}"
+
+
+def game_status_for_uhp(value: Any) -> str:
+    status = str(value or "NotStarted")
+    if status == "Finished(Draw)":
+        return "Draw"
+    if "Winner(White)" in status:
+        return "WhiteWins"
+    if "Winner(Black)" in status:
+        return "BlackWins"
+    return status
+
+
+def turn_string_for_uhp(game: dict[str, Any]) -> str:
+    player_turn = game.get("player_turn")
+    if isinstance(player_turn, str) and player_turn:
+        return player_turn
+
+    turn = game.get("turn")
+    if not isinstance(turn, int):
+        turn = len(moves_from_history(game.get("history")))
+    color = "White" if turn % 2 == 0 else "Black"
+    turn_number = turn // 2 + 1
+    return f"{color}[{turn_number}]"
+
+
+def game_string_for_uhp(game: dict[str, Any]) -> str:
+    parts = [
+        game_type_for_uhp(game.get("game_type")),
+        game_status_for_uhp(game.get("game_status")),
+        turn_string_for_uhp(game),
+    ]
+    history = ";".join(moves_from_history(game.get("history")))
+    if history:
+        parts.append(history)
+    return ";".join(parts)
 
 
 def next_opening_move(game: dict[str, Any], opening: str) -> str | None:
@@ -584,6 +883,14 @@ def player_names(game: dict[str, Any]) -> tuple[str, str]:
     return player_name(game, "white"), player_name(game, "black")
 
 
+def bot_color_and_id(game: dict[str, Any], bot_name: str) -> tuple[str, str] | None:
+    if player_name(game, "white") == bot_name:
+        return "white", player_uid(game, "white")
+    if player_name(game, "black") == bot_name:
+        return "black", player_uid(game, "black")
+    return None
+
+
 def player_in_game(game: dict[str, Any], bot_name: str) -> bool:
     white, black = player_names(game)
     return bot_name == white or bot_name == black
@@ -592,15 +899,19 @@ def player_in_game(game: dict[str, Any], bot_name: str) -> bool:
 def in_progress_game_for(
     games: list[dict[str, Any]], bot_name: str
 ) -> dict[str, Any] | None:
-    for game in games:
+    matches = [
+        game
+        for game in games
         if (
             isinstance(game, dict)
             and not game.get("finished", False)
             and game.get("game_status") == "InProgress"
             and player_in_game(game, bot_name)
-        ):
-            return game
-    return None
+        )
+    ]
+    if not matches:
+        return None
+    return sorted(matches, key=game_sort_key)[0]
 
 
 def offer_players(offer: dict[str, Any]) -> set[str]:
@@ -789,46 +1100,127 @@ def opening_map_for_tournament(tournament: dict[str, Any]) -> dict[str, str]:
     return opening_by_game_id(games, openings)
 
 
+def focused_tournament_game(
+    tournament: dict[str, Any], focused_game_id: str
+) -> dict[str, Any] | None:
+    return next(
+        (game for game in tournament_games(tournament) if game_id(game) == focused_game_id),
+        None,
+    )
+
+
+def color_to_move_from_history(game: dict[str, Any]) -> str:
+    return "white" if len(moves_from_history(game.get("history"))) % 2 == 0 else "black"
+
+
+def play_bot_move(
+    auth: AuthSession,
+    tournament_id: str,
+    bot_name: str,
+    gid: str,
+    move: str,
+    source: str,
+    engine: UhpEngine | None,
+) -> bool:
+    print(f"playing {source} move for {gid}: {move}", flush=True)
+    try:
+        outcome = play_move(auth, gid, move)
+    except ApiError as exc:
+        message = f"{bot_name} stopped playing {gid}: {source} move rejected: {exc}"
+        print(message, flush=True)
+        post_tournament_chat(auth, tournament_id, message)
+        return False
+    if engine is not None:
+        try:
+            engine.record_accepted_move(gid, move, outcome.get("history"))
+        except UhpError as exc:
+            message = f"{bot_name} stopped playing {gid}: UHP engine error after {source} move: {exc}"
+            print(message, flush=True)
+            post_tournament_chat(auth, tournament_id, message)
+            return False
+    return True
+
+
 def play_pending_opening_moves(
     auth: AuthSession,
     tournament: dict[str, Any],
     tournament_id: str,
     bot_name: str,
     focused_game_id: str,
+    engine: UhpEngine | None,
 ) -> bool:
     assigned_openings = opening_map_for_tournament(tournament)
-    if not assigned_openings:
+    tournament_game = focused_tournament_game(tournament, focused_game_id)
+    if not tournament_game:
+        return True
+    bot_identity = bot_color_and_id(tournament_game, bot_name)
+    if not bot_identity:
+        message = f"{bot_name} stopped playing {focused_game_id}: bot is not assigned to this game."
+        print(message, flush=True)
+        post_tournament_chat(auth, tournament_id, message)
         return False
+    bot_color, _bot_user_id = bot_identity
 
     for game in get_pending_games(auth):
         gid = api_game_id(game)
         if gid != focused_game_id:
             continue
+        color_to_move = color_to_move_from_history(game)
+        if color_to_move != bot_color:
+            print(
+                f"skipping {gid}: ply says {color_to_move} to move, not {bot_name} ({bot_color})",
+                flush=True,
+            )
+            return True
         opening = assigned_openings.get(gid)
-        if not opening:
+
+        if opening:
+            divergence = opening_divergence(game, opening)
+            if divergence:
+                index, expected, actual = divergence
+                message = (
+                    f"{bot_name} stopped playing {gid}: opening mismatch at move "
+                    f"{index + 1}. Expected '{expected}', got '{actual}'."
+                )
+                print(message, flush=True)
+                post_tournament_chat(auth, tournament_id, message)
+                return False
+
+            if not opening_complete(game, opening):
+                move = next_opening_move(game, opening)
+                if not move:
+                    return False
+
+                return play_bot_move(
+                    auth,
+                    tournament_id,
+                    bot_name,
+                    gid,
+                    move,
+                    "opening",
+                    engine,
+                )
+
+        if engine is None:
             return False
 
-        divergence = opening_divergence(game, opening)
-        if divergence:
-            index, expected, actual = divergence
-            message = (
-                f"{bot_name} stopped playing {gid}: opening mismatch at move "
-                f"{index + 1}. Expected '{expected}', got '{actual}'."
-            )
+        try:
+            move = engine.bestmove(game)
+        except UhpError as exc:
+            message = f"{bot_name} stopped playing {gid}: UHP engine error: {exc}"
             print(message, flush=True)
             post_tournament_chat(auth, tournament_id, message)
             return False
 
-        if opening_complete(game, opening):
-            return False
-
-        move = next_opening_move(game, opening)
-        if not move:
-            return False
-
-        print(f"playing opening move for {gid}: {move}", flush=True)
-        play_move(auth, gid, move)
-        return True
+        return play_bot_move(
+            auth,
+            tournament_id,
+            bot_name,
+            gid,
+            move,
+            "UHP",
+            engine,
+        )
 
     return True
 
@@ -854,6 +1246,7 @@ def run_once(
     last_heartbeat_at: dt.datetime | None,
     focused_game_id: str | None,
     stopped_playing: bool,
+    engine: UhpEngine | None,
 ) -> tuple[dt.datetime | None, str | None, bool]:
     if focused_game_id and stopped_playing:
         return last_heartbeat_at, focused_game_id, stopped_playing
@@ -869,11 +1262,26 @@ def run_once(
                 tournament_id,
                 bot_name,
                 focused_game_id,
+                engine,
             )
             stopped_playing = not keep_playing
         return last_heartbeat_at, focused_game_id, stopped_playing
 
     games = tournament_games(tournament)
+    resumed_game = in_progress_game_for(games, bot_name)
+    if resumed_game:
+        resumed_game_id = game_id(resumed_game)
+        print(f"resuming {resumed_game_id}; leaving chat coordination", flush=True)
+        keep_playing = play_pending_opening_moves(
+            auth,
+            tournament,
+            tournament_id,
+            bot_name,
+            resumed_game_id,
+            engine,
+        )
+        return last_heartbeat_at, resumed_game_id, not keep_playing
+
     chat = get_tournament_chat(auth, tournament_id)
     messages = coord_messages(chat, tournament_id, now)
     offers = fresh_offers(messages, now)
@@ -963,6 +1371,9 @@ def run_once(
 
 def run_coordinator(args: argparse.Namespace) -> int:
     auth = AuthSession(args.url, args.email, args.password)
+    engine = UhpEngine(args.uhp, args.bot_name) if args.uhp else None
+    if engine:
+        engine.start()
     jitter = deterministic_jitter(args.bot_name)
     last_heartbeat_at: dt.datetime | None = None
     focused_game_id: str | None = None
@@ -982,6 +1393,7 @@ def run_coordinator(args: argparse.Namespace) -> int:
                     last_heartbeat_at,
                     focused_game_id,
                     stopped_playing,
+                    engine,
                 )
             except ApiError as exc:
                 print(f"warning: {exc}", file=sys.stderr, flush=True)
@@ -989,6 +1401,9 @@ def run_coordinator(args: argparse.Namespace) -> int:
     except KeyboardInterrupt:
         print("stopped", flush=True)
         return 0
+    finally:
+        if engine:
+            engine.close()
 
 
 def print_summary(tournament: dict[str, Any], bot_name: str) -> None:
@@ -1046,7 +1461,7 @@ def main() -> int:
         auth = AuthSession(args.url, args.email, args.password)
         tournament = get_tournament(auth, args.tournament_id)
         print_summary(tournament, args.bot_name)
-    except (ApiError, ConfigError) as exc:
+    except (ApiError, ConfigError, UhpError) as exc:
         print(f"error: {exc}", file=sys.stderr)
         return 1
     return 0

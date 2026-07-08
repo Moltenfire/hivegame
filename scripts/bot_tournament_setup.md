@@ -70,11 +70,58 @@ Create local config files, one per bot. Do not commit real credentials.
   "tournament_id": "LG2xvFdhFvb",
   "name": "Bot1",
   "email": "bot1@bots.local",
-  "password": "bot-password"
+  "password": "bot-password",
+  "uhp": {
+    "command": "/home/jondav01/scratch/nokamute/target/release/nokamute uhp",
+    "bestmove": {
+      "mode": "depth",
+      "depth": 1
+    }
+  }
 }
 ```
 
 Repeat for `Bot2`, `Bot3`, and `Bot4`, changing `name` and `email`.
+If the UHP binary path contains spaces, quote the path inside the command
+string, for example `"'/path with spaces/engine' uhp"`.
+
+The `uhp` section is optional. Without it, the coordinator starts games and
+plays assigned opening moves only. With it, the coordinator starts the UHP
+process once when the bot runner starts. For each focused game it sends one
+`newgame <GameTypeString>`, catches the engine up with `play <MoveString>` for
+any existing API history, and then asks the engine for a move when the focused
+game is pending for that bot. After a submitted move is accepted by the API, the
+runner also sends that move to the UHP engine with `play`.
+
+UHP does not receive the full game clock as a separate value. It receives a
+maximum thinking budget through `bestmove`. For fixed-depth play, use:
+
+```json
+"bestmove": {
+  "mode": "depth",
+  "depth": 1
+}
+```
+
+For clock-based play, use:
+
+```json
+"bestmove": {
+  "mode": "time",
+  "use_clock": true,
+  "moves_to_go": 20,
+  "min_seconds": 1,
+  "max_seconds": 10,
+  "max_clock_fraction": 0.5,
+  "protocol": "time"
+}
+```
+
+With `use_clock`, the runner divides the current player's remaining time by
+`moves_to_go`, clamps it between `min_seconds` and `max_seconds`, and also caps
+it at `max_clock_fraction` of the current remaining time. `protocol: "time"`
+sends UHP `bestmove time hh:mm:ss`. Use `protocol: "seconds"` only for engines
+that support `bestmove seconds N`.
 
 ## 4. Run The Coordinator
 
@@ -94,14 +141,18 @@ config file.
 The script logs in automatically, refreshes tokens before expiry, posts coordination heartbeats to tournament chat, and starts eligible games.
 
 After this process starts or accepts a game, it leaves chat coordination and
-focuses only on that game. It polls the bot API until that game is returned as
-pending for this bot. If the game has an assigned opening from the tournament
-description, and the current history is still a prefix of that opening, the
-script submits the next opening move. It does not choose non-opening moves yet,
-and it does not post further coordination chat messages for that process. If
-the current game history differs from the assigned opening before the opening is
-complete, the bot posts one normal tournament chat message describing the
-mismatch and then stops polling or playing.
+focuses only on that game. On restart, if the tournament already has an
+unfinished in-progress game assigned to this bot, the process resumes that game
+before reading coordination chat or offering new games. It polls the bot API
+until the focused game is returned as pending for this bot. If the game has an
+assigned opening from the tournament description, and the current history is
+still a prefix of that opening, the script submits the next opening move. Once
+the assigned opening is complete, or if no opening is assigned, the script asks
+the configured UHP engine for moves. It does not post further coordination chat
+messages for that process. If the current game history differs from the
+assigned opening before the opening is complete, or if the UHP engine errors or
+submits a rejected move, the bot posts one normal tournament chat message
+describing the issue and then stops playing that game.
 
 To inspect one bot's assigned tournament games and openings:
 

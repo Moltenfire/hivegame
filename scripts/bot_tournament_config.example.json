@@ -3,5 +3,12 @@
   "tournament_id": "LG2xvFdhFvb",
   "name": "Bot1",
   "email": "bot1@example.com",
-  "password": "replace-me"
+  "password": "replace-me",
+  "uhp": {
+    "command": "/home/jondav01/scratch/nokamute/target/release/nokamute uhp",
+    "bestmove": {
+      "mode": "depth",
+      "depth": 1
+    }
+  }
 }
