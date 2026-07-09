@@ -25,11 +25,20 @@ def is_heading(line: str) -> bool:
     return line.lstrip().startswith("#")
 
 
+def unescape_markdown_link_text(value: str) -> str:
+    return value.replace(r"\]", "]").replace(r"\\", "\\")
+
+
 def split_opening_link(value: str) -> Opening:
     stripped = value.strip()
-    markdown = re.match(r"^\[(?P<moves>[^\]]+)\]\((?P<link>[^)]+)\)\s*$", stripped)
+    markdown = re.match(
+        r"^\[(?P<moves>(?:\\\]|[^\]])+)\]\((?P<link>[^)]+)\)\s*$", stripped
+    )
     if markdown:
-        return Opening(markdown.group("moves").strip(), markdown.group("link").strip())
+        return Opening(
+            unescape_markdown_link_text(markdown.group("moves").strip()),
+            markdown.group("link").strip(),
+        )
 
     return Opening(stripped, None)
 

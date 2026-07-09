@@ -170,6 +170,7 @@ class UhpEngine:
                 stderr=subprocess.PIPE if self.wire_logger else subprocess.DEVNULL,
                 text=True,
                 bufsize=1,
+                start_new_session=True,
             )
         except OSError as exc:
             raise UhpError(f"Could not start UHP engine for {self.bot_name}: {exc}") from exc

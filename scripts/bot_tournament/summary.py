@@ -38,8 +38,8 @@ def opening_validation_status(
     return None
 
 
-def opening_display(moves: str, link: str | None, validation: str | None) -> str:
-    value = f"[{moves}]({link})" if link else moves
+def opening_display(moves: str, _link: str | None, validation: str | None) -> str:
+    value = moves
     if validation:
         value = f"{value} [{validation}]"
     return value

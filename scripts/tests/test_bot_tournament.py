@@ -34,6 +34,7 @@ from bot_tournament.openings import (
     extract_openings,
     next_opening_move,
     opening_divergence,
+    split_opening_link,
 )
 from bot_tournament.summary import print_summary
 from bot_tournament.uhp import (
@@ -140,6 +141,8 @@ class CoordinationTests(unittest.TestCase):
         shutdown.request()
         self.assertEqual(shutdown.mode, ShutdownMode.DRAINING)
         self.assertTrue(shutdown.event.is_set())
+        shutdown.wait(0)
+        self.assertFalse(shutdown.event.is_set())
         with self.assertRaises(KeyboardInterrupt):
             shutdown.request()
         self.assertEqual(shutdown.mode, ShutdownMode.FORCE_EXIT)
@@ -206,6 +209,16 @@ class OpeningTests(unittest.TestCase):
             ["https://example.test/a", "/analysis?uhp=Base%3BwP%3BbP"],
         )
 
+    def test_opening_link_unescapes_markdown_backslashes(self) -> None:
+        opening = split_opening_link(
+            r"[wL;bL wL\\;wM \\wL;bA1 bM\\](/analysis?uhp=x)"
+        )
+        self.assertEqual(opening.moves, "wL;bL wL\\;wM \\wL;bA1 bM\\")
+
+    def test_opening_link_allows_escaped_closing_bracket_in_text(self) -> None:
+        opening = split_opening_link(r"[wA1 \]bQ](/analysis?uhp=x)")
+        self.assertEqual(opening.moves, r"wA1 ]bQ")
+
     def test_detects_next_move_and_divergence(self) -> None:
         pending = {"history": "wS1"}
         self.assertEqual(next_opening_move(pending, "wS1;bS1 -wS1"), "bS1 -wS1")
@@ -243,7 +256,7 @@ class ConfigTests(unittest.TestCase):
 
 
 class SummaryTests(unittest.TestCase):
-    def test_summary_validates_assigned_openings_and_prints_links(self) -> None:
+    def test_summary_validates_assigned_openings_and_prints_moves(self) -> None:
         engine = Mock()
         tournament = {
             "name": "T",
@@ -255,7 +268,8 @@ class SummaryTests(unittest.TestCase):
         with redirect_stdout(stdout):
             print_summary(tournament, "Bot1", engine)
         engine.validate_opening.assert_called_once_with(None, "wS1;bS1 -wS1")
-        self.assertIn("[wS1;bS1 -wS1](https://example.test/a)", stdout.getvalue())
+        self.assertIn("- wS1;bS1 -wS1\n", stdout.getvalue())
+        self.assertNotIn("https://example.test/a", stdout.getvalue())
         self.assertNotIn("ok", stdout.getvalue())
         self.assertNotIn("not validated", stdout.getvalue())
 

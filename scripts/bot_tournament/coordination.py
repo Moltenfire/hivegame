@@ -78,6 +78,7 @@ class ShutdownController:
 
     def wait(self, seconds: float) -> None:
         self.event.wait(seconds)
+        self.event.clear()
 
 
 def in_progress_game_for(
@@ -568,8 +569,6 @@ def run_coordinator(
     tournament_config: TournamentConfig, bot_config: BotConfig, engine: UhpEngine | None
 ) -> int:
     auth = AuthSession(tournament_config.url, bot_config.email, bot_config.password)
-    if engine:
-        engine.start()
     shutdown = ShutdownController()
 
     def handle_sigint(_signum: int, _frame: Any) -> None:
@@ -592,6 +591,8 @@ def run_coordinator(
         jitter,
     )
     try:
+        if engine:
+            engine.start()
         while not completed:
             try:
                 (
