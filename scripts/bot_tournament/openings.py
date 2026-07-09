@@ -1,9 +1,17 @@
 # Extracts assigned tournament openings and checks game histories against them.
 from __future__ import annotations
 
+import re
+from dataclasses import dataclass
 from typing import Any
 
 from .game_data import game_id, game_sort_key, moves_from_history, player_name, tournament_games
+
+
+@dataclass(frozen=True)
+class Opening:
+    moves: str
+    link: str | None = None
 
 
 def opening_heading(line: str) -> bool:
@@ -17,8 +25,17 @@ def is_heading(line: str) -> bool:
     return line.lstrip().startswith("#")
 
 
-def extract_openings(description: str) -> list[str]:
-    openings: list[str] = []
+def split_opening_link(value: str) -> Opening:
+    stripped = value.strip()
+    markdown = re.match(r"^\[(?P<moves>[^\]]+)\]\((?P<link>[^)]+)\)\s*$", stripped)
+    if markdown:
+        return Opening(markdown.group("moves").strip(), markdown.group("link").strip())
+
+    return Opening(stripped, None)
+
+
+def extract_opening_entries(description: str) -> list[Opening]:
+    openings: list[Opening] = []
     in_openings = False
 
     for line in description.splitlines():
@@ -33,11 +50,15 @@ def extract_openings(description: str) -> list[str]:
         if is_heading(stripped):
             break
         if stripped.startswith("- "):
-            openings.append(stripped[2:].strip())
+            openings.append(split_opening_link(stripped[2:].strip()))
             continue
         break
 
     return openings
+
+
+def extract_openings(description: str) -> list[str]:
+    return [opening.moves for opening in extract_opening_entries(description)]
 
 
 def moves_from_opening(opening: str) -> list[str]:
@@ -83,7 +104,18 @@ def opening_complete(game: dict[str, Any], opening: str) -> bool:
 def opening_by_game_id(
     games: list[dict[str, Any]], openings: list[str]
 ) -> dict[str, str]:
-    assigned: dict[str, str] = {}
+    return {
+        gid: opening.moves
+        for gid, opening in opening_entries_by_game_id(
+            games, [Opening(moves) for moves in openings]
+        ).items()
+    }
+
+
+def opening_entries_by_game_id(
+    games: list[dict[str, Any]], openings: list[Opening]
+) -> dict[str, Opening]:
+    assigned: dict[str, Opening] = {}
     groups: dict[tuple[str, str], list[dict[str, Any]]] = {}
 
     for game in games:
@@ -92,7 +124,7 @@ def opening_by_game_id(
 
     for group in groups.values():
         for index, game in enumerate(sorted(group, key=lambda item: game_id(item))):
-            assigned[game_id(game)] = openings[index] if index < len(openings) else ""
+            assigned[game_id(game)] = openings[index] if index < len(openings) else Opening("")
 
     return assigned
 

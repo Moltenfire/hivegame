@@ -2,10 +2,12 @@
 from __future__ import annotations
 
 import datetime as dt
+import io
 import os
 import sys
 import tempfile
 import unittest
+from contextlib import redirect_stdout
 from unittest.mock import Mock, patch
 
 SCRIPT_DIR = os.path.dirname(os.path.dirname(__file__))
@@ -26,8 +28,15 @@ from bot_tournament.coordination import (
     run_once,
     unfinished_games_for,
 )
-from bot_tournament.openings import extract_openings, next_opening_move, opening_divergence
-from bot_tournament.uhp import bestmove_command_for_game
+from bot_tournament.errors import UhpError
+from bot_tournament.openings import (
+    extract_opening_entries,
+    extract_openings,
+    next_opening_move,
+    opening_divergence,
+)
+from bot_tournament.summary import print_summary
+from bot_tournament.uhp import bestmove_command_for_game, game_string_for_opening
 
 
 def game(gid: str, white: str, black: str, status: str = "NotStarted") -> dict:
@@ -178,6 +187,19 @@ class OpeningTests(unittest.TestCase):
         description = "# Title\n\n## Openings\n- wS1;bS1 -wS1\n- wP;bP\n\n## Other\n- ignored"
         self.assertEqual(extract_openings(description), ["wS1;bS1 -wS1", "wP;bP"])
 
+    def test_extracts_opening_links_after_moves(self) -> None:
+        description = (
+            "## Openings\n"
+            "- [wS1;bS1 -wS1](https://example.test/a)\n"
+            "- [wP;bP](/analysis?uhp=Base%3BwP%3BbP)\n"
+        )
+        openings = extract_opening_entries(description)
+        self.assertEqual([opening.moves for opening in openings], ["wS1;bS1 -wS1", "wP;bP"])
+        self.assertEqual(
+            [opening.link for opening in openings],
+            ["https://example.test/a", "/analysis?uhp=Base%3BwP%3BbP"],
+        )
+
     def test_detects_next_move_and_divergence(self) -> None:
         pending = {"history": "wS1"}
         self.assertEqual(next_opening_move(pending, "wS1;bS1 -wS1"), "bS1 -wS1")
@@ -214,6 +236,37 @@ class ConfigTests(unittest.TestCase):
             load_bot_config(bot_path)
 
 
+class SummaryTests(unittest.TestCase):
+    def test_summary_validates_assigned_openings_and_prints_links(self) -> None:
+        engine = Mock()
+        tournament = {
+            "name": "T",
+            "tournament_id": "tid",
+            "description": "## Openings\n- [wS1;bS1 -wS1](https://example.test/a)",
+            "games": [game("g1", "Bot1", "Bot2")],
+        }
+        stdout = io.StringIO()
+        with redirect_stdout(stdout):
+            print_summary(tournament, "Bot1", engine)
+        engine.validate_opening.assert_called_once_with(None, "wS1;bS1 -wS1")
+        self.assertIn("[wS1;bS1 -wS1](https://example.test/a)", stdout.getvalue())
+        self.assertNotIn("ok", stdout.getvalue())
+        self.assertNotIn("not validated", stdout.getvalue())
+
+    def test_summary_reports_invalid_opening_in_openings_section(self) -> None:
+        engine = Mock()
+        engine.validate_opening.side_effect = UhpError("invalidmove bad")
+        tournament = {
+            "description": "## Openings\n- wS1;bS1 -wS1",
+            "games": [game("g1", "Bot1", "Bot2")],
+        }
+        stdout = io.StringIO()
+        with self.assertRaises(UhpError):
+            with redirect_stdout(stdout):
+                print_summary(tournament, "Bot1", engine)
+        self.assertIn("- wS1;bS1 -wS1 [invalid: invalidmove bad]", stdout.getvalue())
+
+
 class UhpTests(unittest.TestCase):
     def test_bestmove_depth_command(self) -> None:
         self.assertEqual(bestmove_command_for_game({}, {"mode": "depth", "depth": 2}), "bestmove depth 2")
@@ -237,6 +290,12 @@ class UhpTests(unittest.TestCase):
             },
         )
         self.assertEqual(command, "bestmove time 00:00:05")
+
+    def test_game_string_for_opening_uses_turn_after_moves(self) -> None:
+        self.assertEqual(
+            game_string_for_opening("MLP", "wS1;bS1 -wS1;wQ wS1/"),
+            "Base+MLP;InProgress;Black[2];wS1;bS1 -wS1;wQ wS1/",
+        )
 
 
 if __name__ == "__main__":

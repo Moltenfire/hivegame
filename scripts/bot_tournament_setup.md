@@ -193,3 +193,16 @@ To inspect one bot's assigned tournament games and openings:
 ```bash
 ./scripts/bot_tournament_summary.py summary tournament.json bot1.json
 ```
+
+Summary mode validates assigned openings with the configured UHP engine by
+loading each opening as a `newgame <GameString>`. Valid openings are printed
+without extra output. Invalid openings are marked in the `Openings` section and
+summary exits non-zero.
+
+Opening lines can be plain moves or a markdown link whose text is the move list.
+The coordinator uses only the moves for gameplay and validation.
+
+```text
+- wS1;bS1 -wS1
+- [wS1;bS1 -wS1](https://example.test/analysis)
+```

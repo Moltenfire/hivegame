@@ -93,6 +93,22 @@ def game_type_for_uhp(value: Any) -> str:
     return f"Base+{game_type}"
 
 
+def turn_string_after_moves(move_count: int) -> str:
+    color = "White" if move_count % 2 == 0 else "Black"
+    return f"{color}[{move_count // 2 + 1}]"
+
+
+def game_string_for_opening(game_type: Any, opening: str) -> str:
+    moves = moves_from_history(opening)
+    parts = [
+        game_type_for_uhp(game_type),
+        "InProgress" if moves else "NotStarted",
+        turn_string_after_moves(len(moves)),
+    ]
+    parts.extend(moves)
+    return ";".join(parts)
+
+
 class UhpEngine:
     def __init__(
         self, config: UhpConfig, bot_name: str, wire_logger: logging.Logger | None = None
@@ -242,3 +258,7 @@ class UhpEngine:
         if not candidates:
             raise UhpError("UHP engine returned no bestmove")
         return candidates[-1].rstrip(";")
+
+    def validate_opening(self, game_type: Any, opening: str) -> None:
+        self.command_io(f"newgame {game_string_for_opening(game_type, opening)}")
+        self.clear_game()

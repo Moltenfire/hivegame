@@ -43,5 +43,9 @@ logs
 bot-credentials*.json
 bots*.json
 
+# Python generated files
+__pycache__/
+*.py[cod]
+
 CLAUDE.md
 AGENTS.md

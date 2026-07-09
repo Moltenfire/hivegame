@@ -64,7 +64,12 @@ def main() -> int:
 
         auth = AuthSession(tournament_config.url, bot_config.email, bot_config.password)
         tournament = get_tournament(auth, tournament_config.tournament_id)
-        print_summary(tournament, bot_config.name)
+        engine = UhpEngine(bot_config.uhp, bot_config.name) if bot_config.uhp else None
+        try:
+            print_summary(tournament, bot_config.name, engine)
+        finally:
+            if engine:
+                engine.close()
     except (ApiError, ConfigError, UhpError) as exc:
         print(f"error: {exc}", file=sys.stderr)
         return 1
