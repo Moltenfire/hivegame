@@ -96,8 +96,9 @@ credentials.
       "NumThreads": 1
     },
     "bestmove": {
-      "mode": "depth",
-      "depth": 1
+      "mode": "time",
+      "use_clock": true,
+      "protocol": "clock"
     }
   }
 }
@@ -114,7 +115,27 @@ process for this bot runner, applies configured UHP options with
 `nokamute`, set `"NumThreads": 1` to avoid one bot using all available cores.
 
 UHP does not receive the full game clock as a separate value. It receives a
-maximum thinking budget through `bestmove`. For fixed-depth play, use:
+maximum thinking budget through `bestmove`. The recommended clock-based config
+is:
+
+```json
+"bestmove": {
+  "mode": "time",
+  "use_clock": true,
+  "protocol": "clock"
+}
+```
+
+With `protocol: "clock"`, the runner sends the current player's remaining time
+directly to UHP as `bestmove clock <remaining_seconds> [increment_seconds]`.
+The increment is included when the game has one.
+
+For engines without `bestmove clock` support, `protocol: "time"` sends
+`bestmove time hh:mm:ss` and `protocol: "seconds"` sends `bestmove seconds N`.
+Those older protocols use `seconds`, or divide the clock by `moves_to_go` when
+`use_clock` is enabled.
+
+For fixed-depth play, use:
 
 ```json
 "bestmove": {
@@ -122,26 +143,6 @@ maximum thinking budget through `bestmove`. For fixed-depth play, use:
   "depth": 1
 }
 ```
-
-For clock-based play, use:
-
-```json
-"bestmove": {
-  "mode": "time",
-  "use_clock": true,
-  "moves_to_go": 20,
-  "min_seconds": 1,
-  "max_seconds": 10,
-  "max_clock_fraction": 0.5,
-  "protocol": "time"
-}
-```
-
-With `use_clock`, the runner divides the current player's remaining time by
-`moves_to_go`, clamps it between `min_seconds` and `max_seconds`, and also caps
-it at `max_clock_fraction` of the current remaining time. `protocol: "time"`
-sends UHP `bestmove time hh:mm:ss`. Use `protocol: "seconds"` only for engines
-that support `bestmove seconds N`.
 
 Runtime app logs go to stdout and to a per-run file such as
 `logs/Bot1-20260708-143012.log`. UHP stdin/stdout/stderr wire logs are file-only

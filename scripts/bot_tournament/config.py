@@ -108,6 +108,12 @@ def validate_uhp_bestmove_config(config: dict[str, Any]) -> None:
     if mode != "time":
         raise ConfigError(f"Unsupported config field uhp.bestmove.mode: {mode}")
 
+    protocol = str(config.get("protocol", "time"))
+    if protocol not in {"time", "seconds", "clock"}:
+        raise ConfigError(f"Unsupported config field uhp.bestmove.protocol: {protocol}")
+    if protocol == "clock":
+        return
+
     positive_float(config.get("seconds", 5), "uhp.bestmove.seconds")
     positive_float(config.get("min_seconds", 1), "uhp.bestmove.min_seconds")
     positive_float(
@@ -119,9 +125,6 @@ def validate_uhp_bestmove_config(config: dict[str, Any]) -> None:
         config.get("max_clock_fraction", 0.5),
         "uhp.bestmove.max_clock_fraction",
     )
-    protocol = str(config.get("protocol", "time"))
-    if protocol not in {"time", "seconds"}:
-        raise ConfigError(f"Unsupported config field uhp.bestmove.protocol: {protocol}")
 
 
 def load_tournament_config(path: str) -> TournamentConfig:

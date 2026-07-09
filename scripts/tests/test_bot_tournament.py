@@ -36,7 +36,13 @@ from bot_tournament.openings import (
     opening_divergence,
 )
 from bot_tournament.summary import print_summary
-from bot_tournament.uhp import bestmove_command_for_game, game_string_for_opening
+from bot_tournament.uhp import (
+    bestmove_command_for_game,
+    current_player_time_left_seconds,
+    duration_seconds,
+    game_string_for_opening,
+    increment_seconds,
+)
 
 
 def game(gid: str, white: str, black: str, status: str = "NotStarted") -> dict:
@@ -271,11 +277,53 @@ class UhpTests(unittest.TestCase):
     def test_bestmove_depth_command(self) -> None:
         self.assertEqual(bestmove_command_for_game({}, {"mode": "depth", "depth": 2}), "bestmove depth 2")
 
-    def test_bestmove_time_uses_clock_budget(self) -> None:
+    def test_bestmove_clock_uses_remaining_time_and_increment(self) -> None:
         game_state = {
             "current_player_id": "w",
             "white_id": "w",
             "white_time_left": 100_000_000_000,
+            "time_increment": 5,
+        }
+        command = bestmove_command_for_game(
+            game_state,
+            {
+                "mode": "time",
+                "use_clock": True,
+                "protocol": "clock",
+            },
+        )
+        self.assertEqual(command, "bestmove clock 100 5")
+
+    def test_bestmove_clock_uses_black_clock_when_black_to_move(self) -> None:
+        game_state = {
+            "current_player_id": "b",
+            "white_id": "w",
+            "black_id": "b",
+            "white_time_left": 100_000_000_000,
+            "black_time_left": 40_000_000_000,
+        }
+        command = bestmove_command_for_game(
+            game_state,
+            {
+                "mode": "time",
+                "use_clock": True,
+                "protocol": "clock",
+            },
+        )
+        self.assertEqual(command, "bestmove clock 40")
+
+    def test_bestmove_clock_requires_current_player_clock(self) -> None:
+        with self.assertRaises(UhpError):
+            bestmove_command_for_game(
+                {"current_player_id": "w", "white_id": "w"},
+                {"mode": "time", "use_clock": True, "protocol": "clock"},
+            )
+
+    def test_bestmove_time_protocol_still_clamps_to_max_seconds(self) -> None:
+        game_state = {
+            "current_player_id": "w",
+            "white_id": "w",
+            "white_time_left": 1_000_000_000_000,
         }
         command = bestmove_command_for_game(
             game_state,
@@ -289,7 +337,62 @@ class UhpTests(unittest.TestCase):
                 "protocol": "time",
             },
         )
-        self.assertEqual(command, "bestmove time 00:00:05")
+        self.assertEqual(command, "bestmove time 00:00:10")
+
+    def test_bestmove_seconds_protocol_still_clamps_to_clock_fraction(self) -> None:
+        game_state = {
+            "current_player_id": "w",
+            "white_id": "w",
+            "white_time_left": 3_000_000_000,
+        }
+        command = bestmove_command_for_game(
+            game_state,
+            {
+                "mode": "time",
+                "use_clock": True,
+                "moves_to_go": 1,
+                "min_seconds": 1,
+                "max_seconds": 10,
+                "max_clock_fraction": 0.5,
+                "protocol": "seconds",
+            },
+        )
+        self.assertEqual(command, "bestmove seconds 1.5")
+
+    def test_current_player_time_falls_back_to_ply_parity(self) -> None:
+        self.assertEqual(
+            current_player_time_left_seconds(
+                {
+                    "turn": 2,
+                    "white_time_left": 30_000_000_000,
+                    "black_time_left": 40_000_000_000,
+                }
+            ),
+            30,
+        )
+        self.assertEqual(
+            current_player_time_left_seconds(
+                {
+                    "turn": 3,
+                    "white_time_left": 30_000_000_000,
+                    "black_time_left": 40_000_000_000,
+                }
+            ),
+            40,
+        )
+
+    def test_duration_seconds_accepts_structured_duration_json(self) -> None:
+        self.assertEqual(duration_seconds({"secs": 2, "nanos": 500_000_000}), 2.5)
+        self.assertEqual(
+            duration_seconds({"seconds": 3, "nanoseconds": 250_000_000}), 3.25
+        )
+
+    def test_increment_seconds_accepts_seconds_or_duration_json(self) -> None:
+        self.assertEqual(increment_seconds({"time_increment": 7}), 7)
+        self.assertEqual(
+            increment_seconds({"time_increment": {"secs": 1, "nanos": 500_000_000}}),
+            1.5,
+        )
 
     def test_game_string_for_opening_uses_turn_after_moves(self) -> None:
         self.assertEqual(

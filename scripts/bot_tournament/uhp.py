@@ -27,6 +27,27 @@ def uhp_option_value(value: str | int | float | bool) -> str:
     return str(value)
 
 
+def duration_seconds(value: Any) -> float | None:
+    if isinstance(value, (int, float)) and value > 0:
+        return float(value) / 1_000_000_000
+    if not isinstance(value, dict):
+        return None
+
+    raw_seconds = value.get("secs", value.get("seconds", 0))
+    raw_nanos = value.get("nanos", value.get("nanoseconds", 0))
+    try:
+        seconds = float(raw_seconds)
+        nanos = float(raw_nanos)
+    except (TypeError, ValueError):
+        return None
+    total = seconds + (nanos / 1_000_000_000)
+    return total if total > 0 else None
+
+
+def format_seconds(value: float) -> str:
+    return f"{value:g}"
+
+
 def current_player_time_left_seconds(game: dict[str, Any]) -> float | None:
     current = str(game.get("current_player_id") or "")
     white_id = str(game.get("white_id") or "")
@@ -43,9 +64,14 @@ def current_player_time_left_seconds(game: dict[str, Any]) -> float | None:
             else game.get("black_time_left")
         )
 
+    return duration_seconds(raw)
+
+
+def increment_seconds(game: dict[str, Any]) -> float | None:
+    raw = game.get("time_increment")
     if isinstance(raw, (int, float)) and raw > 0:
-        return float(raw) / 1_000_000_000
-    return None
+        return float(raw)
+    return duration_seconds(raw)
 
 
 def bestmove_command_for_game(game: dict[str, Any], config: dict[str, Any]) -> str:
@@ -56,6 +82,17 @@ def bestmove_command_for_game(game: dict[str, Any], config: dict[str, Any]) -> s
 
     if mode != "time":
         raise UhpError(f"Unsupported uhp.bestmove.mode: {mode}")
+
+    protocol = str(config.get("protocol", "time"))
+    if protocol == "clock":
+        remaining = current_player_time_left_seconds(game)
+        if remaining is None:
+            raise UhpError("Game does not include current player time left")
+        increment = increment_seconds(game)
+        command = f"bestmove clock {format_seconds(remaining)}"
+        if increment is not None:
+            command = f"{command} {format_seconds(increment)}"
+        return command
 
     fallback_seconds = positive_float(config.get("seconds", 5), "uhp.bestmove.seconds")
     seconds = fallback_seconds
@@ -71,14 +108,12 @@ def bestmove_command_for_game(game: dict[str, Any], config: dict[str, Any]) -> s
                 "uhp.bestmove.max_clock_fraction",
             )
             seconds = min(seconds, remaining * max_fraction)
-
     min_seconds = positive_float(config.get("min_seconds", 1), "uhp.bestmove.min_seconds")
     max_seconds = positive_float(
         config.get("max_seconds", fallback_seconds), "uhp.bestmove.max_seconds"
     )
     seconds = max(min_seconds, min(seconds, max_seconds))
 
-    protocol = str(config.get("protocol", "time"))
     if protocol == "seconds":
         return f"bestmove seconds {seconds:g}"
     if protocol == "time":
