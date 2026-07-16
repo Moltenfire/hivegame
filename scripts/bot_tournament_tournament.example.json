@@ -1,8 +1,5 @@
 {
   "url": "http://localhost:3000",
   "tournament_id": "LG2xvFdhFvb",
-  "poll_seconds": 5,
-  "heartbeat_seconds": 20,
-  "online_seconds": 45,
-  "offer_seconds": 30
+  "poll_seconds": 5
 }

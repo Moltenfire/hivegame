@@ -187,10 +187,27 @@ async fn handle_control(
     };
 
     if req.control == "start" {
+        if game.game_status != GameStatus::NotStarted.to_string() {
+            return Err(anyhow!("Game has already started"));
+        }
+        for player_id in [game.white_id, game.black_id] {
+            let player = User::find_by_uuid(&player_id, &mut conn).await?;
+            let player_is_busy = player
+                .get_ongoing_games(&mut conn)
+                .await?
+                .iter()
+                .any(|other| {
+                    other.nanoid != game.nanoid
+                        && other.game_status == GameStatus::InProgress.to_string()
+                });
+            if player_is_busy {
+                return Err(anyhow!("A player is already in another game"));
+            }
+        }
         let should_start = hub
             .data
             .game_start
-            .should_start(&game, bot.id)
+            .should_start_exclusive(&game, bot.id)
             .map_err(|e| anyhow!(e.to_string()))?;
 
         let (game, reaction) = if should_start {
@@ -199,6 +216,9 @@ async fn handle_control(
                     async move { Ok(game.start(tc).await?) }.scope_boxed()
                 })
                 .await?;
+            hub.data
+                .game_start
+                .complete_request(&GameId(started_game.nanoid.clone()))?;
             (started_game, GameReaction::Started)
         } else {
             (game, GameReaction::Ready)

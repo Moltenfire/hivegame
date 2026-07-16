@@ -1,7 +1,6 @@
 # Unit tests for pure bot tournament coordinator logic.
 from __future__ import annotations
 
-import datetime as dt
 import io
 import os
 import sys
@@ -14,7 +13,6 @@ SCRIPT_DIR = os.path.dirname(os.path.dirname(__file__))
 if SCRIPT_DIR not in sys.path:
     sys.path.insert(0, SCRIPT_DIR)
 
-from bot_tournament.chat_protocol import coord_json, coord_message, latest_heartbeats
 from bot_tournament.config import (
     ConfigError,
     TournamentConfig,
@@ -56,51 +54,16 @@ def game(gid: str, white: str, black: str, status: str = "NotStarted") -> dict:
     }
 
 
-class ChatProtocolTests(unittest.TestCase):
-    def test_rejects_payload_when_chat_sender_does_not_match_bot(self) -> None:
-        now = dt.datetime(2026, 7, 8, tzinfo=dt.UTC)
-        text = coord_message(
-            {
-                "v": 1,
-                "type": "heartbeat",
-                "bot": "Bot2",
-                "tournament_id": "T",
-                "state": "idle",
-                "game_id": None,
-            }
-        )
-        message = {
-            "message": {
-                "username": "Bot1",
-                "message": text,
-                "timestamp": "2026-07-08T10:00:00+00:00",
-            }
-        }
-        self.assertIsNone(coord_json(message, now))
-
-    def test_latest_heartbeats_keeps_newest_online_message(self) -> None:
-        now = dt.datetime(2026, 7, 8, 10, 1, tzinfo=dt.UTC)
-        messages = [
-            {"type": "heartbeat", "bot": "Bot1", "_timestamp": now - dt.timedelta(seconds=10)},
-            {"type": "heartbeat", "bot": "Bot1", "_timestamp": now - dt.timedelta(seconds=5)},
-            {"type": "heartbeat", "bot": "Bot2", "_timestamp": now - dt.timedelta(seconds=50)},
-        ]
-        heartbeats = latest_heartbeats(messages, 45, now)
-        self.assertEqual(heartbeats["Bot1"]["_timestamp"], now - dt.timedelta(seconds=5))
-        self.assertNotIn("Bot2", heartbeats)
-
-
 class CoordinationTests(unittest.TestCase):
-    def test_eligible_games_require_online_idle_players(self) -> None:
-        games = [game("g2", "Bot3", "Bot4"), game("g1", "Bot1", "Bot2")]
-        now = dt.datetime(2026, 7, 8, tzinfo=dt.UTC)
-        heartbeats = {
-            name: {"state": "idle", "_timestamp": now}
-            for name in ("Bot1", "Bot2", "Bot3")
-        }
+    def test_eligible_games_exclude_players_already_in_progress(self) -> None:
+        games = [
+            game("g2", "Bot3", "Bot4"),
+            game("g1", "Bot1", "Bot2"),
+            game("active", "Bot2", "Bot5", "InProgress"),
+        ]
         self.assertEqual(
-            [item["game_id"] for item in eligible_games(games, heartbeats, [])],
-            ["g1"],
+            [item["game_id"] for item in eligible_games(games)],
+            ["g2"],
         )
 
     def test_unfinished_games_for_only_counts_assigned_unfinished_games(self) -> None:
@@ -123,18 +86,18 @@ class CoordinationTests(unittest.TestCase):
         with patch(
             "bot_tournament.coordination.get_tournament",
             return_value={"games": [finished]},
-        ), patch("bot_tournament.coordination.get_tournament_chat") as chat:
+        ):
             result = run_once(
                 Mock(),
                 tournament_config,
                 "Bot1",
                 None,
-                None,
                 False,
                 None,
+                set(),
+                None,
             )
-        self.assertEqual(result, (None, None, False, True))
-        chat.assert_not_called()
+        self.assertEqual(result, (None, False, None, True))
 
     def test_shutdown_controller_drains_then_forces_exit(self) -> None:
         shutdown = ShutdownController()
@@ -147,7 +110,7 @@ class CoordinationTests(unittest.TestCase):
             shutdown.request()
         self.assertEqual(shutdown.mode, ShutdownMode.FORCE_EXIT)
 
-    def test_run_once_draining_exits_finished_focused_game_without_heartbeat(self) -> None:
+    def test_run_once_draining_exits_finished_focused_game(self) -> None:
         finished = game("g1", "Bot1", "Bot2", "InProgress")
         finished["finished"] = True
         tournament_config = TournamentConfig(url="http://localhost:3000", tournament_id="T")
@@ -155,40 +118,121 @@ class CoordinationTests(unittest.TestCase):
         with patch(
             "bot_tournament.coordination.get_tournament",
             return_value={"games": [finished]},
-        ), patch("bot_tournament.coordination.post_heartbeat") as heartbeat:
+        ):
             result = run_once(
                 Mock(),
                 tournament_config,
                 "Bot1",
-                None,
                 "g1",
                 False,
+                None,
+                set(),
                 engine,
                 True,
             )
-        self.assertEqual(result, (None, None, False, True))
+        self.assertEqual(result, (None, False, None, True))
         engine.clear_game.assert_called_once()
-        heartbeat.assert_not_called()
 
-    def test_run_once_draining_idle_exits_without_reading_chat(self) -> None:
+    def test_run_once_draining_idle_exits_without_reading_requests(self) -> None:
         pending = game("g1", "Bot1", "Bot2")
         tournament_config = TournamentConfig(url="http://localhost:3000", tournament_id="T")
         with patch(
             "bot_tournament.coordination.get_tournament",
             return_value={"games": [pending]},
-        ), patch("bot_tournament.coordination.get_tournament_chat") as chat:
+        ), patch("bot_tournament.coordination.get_game_requests") as requests:
             result = run_once(
                 Mock(),
                 tournament_config,
                 "Bot1",
                 None,
-                None,
                 False,
+                None,
+                set(),
                 None,
                 True,
             )
-        self.assertEqual(result, (None, None, False, True))
-        chat.assert_not_called()
+        self.assertEqual(result, (None, False, None, True))
+        requests.assert_not_called()
+
+    def test_white_opens_request_for_first_eligible_game(self) -> None:
+        pending = game("g1", "Bot1", "Bot2")
+        tournament_config = TournamentConfig(url="http://localhost:3000", tournament_id="T")
+        with patch(
+            "bot_tournament.coordination.get_tournament",
+            return_value={"games": [pending]},
+        ), patch(
+            "bot_tournament.coordination.get_game_requests", return_value=[]
+        ), patch(
+            "bot_tournament.coordination.start_game",
+            return_value={"ready": True, "started": False},
+        ) as start:
+            result = run_once(
+                Mock(), tournament_config, "Bot1", None, False, None, set(), None
+            )
+        self.assertEqual(result, (None, False, "g1", False))
+        start.assert_called_once_with(unittest.mock.ANY, "g1")
+
+    def test_black_accepts_incoming_request(self) -> None:
+        pending = game("g1", "Bot1", "Bot2")
+        tournament_config = TournamentConfig(url="http://localhost:3000", tournament_id="T")
+        request = {
+            "game_id": "g1",
+            "proposer_username": "Bot1",
+            "outgoing": False,
+        }
+        with patch(
+            "bot_tournament.coordination.get_tournament",
+            return_value={"games": [pending]},
+        ), patch(
+            "bot_tournament.coordination.get_game_requests", return_value=[request]
+        ), patch(
+            "bot_tournament.coordination.start_game",
+            return_value={"ready": False, "started": True},
+        ):
+            result = run_once(
+                Mock(), tournament_config, "Bot2", None, False, None, set(), None
+            )
+        self.assertEqual(result, ("g1", False, None, False))
+
+    def test_restart_resumes_live_outgoing_request_without_renewing_it(self) -> None:
+        pending = game("g1", "Bot1", "Bot2")
+        tournament_config = TournamentConfig(url="http://localhost:3000", tournament_id="T")
+        request = {
+            "game_id": "g1",
+            "proposer_username": "Bot1",
+            "outgoing": True,
+        }
+        with patch(
+            "bot_tournament.coordination.get_tournament",
+            return_value={"games": [pending]},
+        ), patch(
+            "bot_tournament.coordination.get_game_requests", return_value=[request]
+        ), patch("bot_tournament.coordination.start_game") as start:
+            result = run_once(
+                Mock(), tournament_config, "Bot1", None, False, None, set(), None
+            )
+        self.assertEqual(result, (None, False, "g1", False))
+        start.assert_not_called()
+
+    def test_expired_request_rotates_to_another_opponent(self) -> None:
+        games = [game("g1", "Bot1", "Bot2"), game("g2", "Bot1", "Bot3")]
+        tournament_config = TournamentConfig(url="http://localhost:3000", tournament_id="T")
+        attempted: set[str] = set()
+        with patch(
+            "bot_tournament.coordination.get_tournament",
+            return_value={"games": games},
+        ), patch(
+            "bot_tournament.coordination.get_game_requests", return_value=[]
+        ), patch(
+            "bot_tournament.coordination.start_game",
+            return_value={"ready": True, "started": False},
+        ) as start:
+            result = run_once(
+                Mock(), tournament_config, "Bot1", None, False, "g1", attempted, None
+            )
+        self.assertEqual(result, (None, False, "g2", False))
+        self.assertEqual(attempted, {"g1"})
+        start.assert_called_once_with(unittest.mock.ANY, "g2")
 
 
 class OpeningTests(unittest.TestCase):
@@ -245,6 +289,15 @@ class ConfigTests(unittest.TestCase):
         bot = load_bot_config(bot_path)
         self.assertEqual(bot.name, "Bot1")
         self.assertEqual(bot.uhp.options["NumThreads"], 1)
+
+    def test_legacy_chat_timing_fields_are_ignored(self) -> None:
+        tournament_path = self.write_json(
+            '{"url":"http://localhost:3000","tournament_id":"T",'
+            '"heartbeat_seconds":20,"online_seconds":45,"offer_seconds":30}'
+        )
+        tournament = load_tournament_config(tournament_path)
+        self.assertEqual(tournament.tournament_id, "T")
+        self.assertFalse(hasattr(tournament, "heartbeat_seconds"))
 
     def test_rejects_uhp_option_values_with_whitespace(self) -> None:
         bot_path = self.write_json(

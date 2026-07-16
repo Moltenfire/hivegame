@@ -70,10 +70,7 @@ credentials.
 {
   "url": "http://localhost:3000",
   "tournament_id": "LG2xvFdhFvb",
-  "poll_seconds": 5,
-  "heartbeat_seconds": 20,
-  "online_seconds": 45,
-  "offer_seconds": 30
+  "poll_seconds": 5
 }
 ```
 
@@ -164,30 +161,29 @@ When using Docker Compose, run the coordinator on the host. The app container
 publishes the API at `http://localhost:3000`, so keep that URL in the
 tournament config file.
 
-The script logs in automatically, refreshes tokens before expiry, posts
-coordination heartbeats to tournament chat, and starts eligible games.
+The script logs in automatically, refreshes tokens before expiry, and coordinates
+game starts through short-lived requests. White opens a request for an assigned
+fixture. Black accepts it, which starts the existing tournament game. If the
+request expires after 35 seconds, White tries another assigned opponent.
 
 Press `Ctrl+C` once to request a graceful shutdown. If the bot is idle, it exits
 immediately. If it is playing a game, it stops coordinating new games, finishes
 the focused game, and then exits. Press `Ctrl+C` a second time to exit
 immediately.
 
-After this process starts or accepts a game, it leaves chat coordination and
+After this process starts or accepts a game, it leaves request coordination and
 focuses only on that game. On restart, if the tournament already has an
 unfinished in-progress game assigned to this bot, the process resumes that game
-before reading coordination chat or offering new games. It polls the bot API
+before opening or accepting requests. It polls the bot API
 until the focused game is returned as pending for this bot. If the game has an
 assigned opening from the tournament description, and the current history is
 still a prefix of that opening, the script submits the next opening move. Once
 the assigned opening is complete, or if no opening is assigned, the script asks
-the configured UHP engine for moves. It does not post further coordination chat
-messages for that process. If the current game history differs from the
+the configured UHP engine for moves. If the current game history differs from the
 assigned opening before the opening is complete, or if the UHP engine errors or
-submits a rejected move, the bot posts one normal tournament chat message
-describing the issue and then stops playing that game. When the focused game
-finishes, including by timeout, the process clears its local UHP game state,
-posts a fresh idle heartbeat, and then returns to tournament coordination on
-the next poll.
+submits a rejected move, the bot logs the issue and then stops playing that game.
+When the focused game finishes, including by timeout, the process clears its
+local UHP game state and returns to request coordination on the next poll.
 
 To inspect one bot's assigned tournament games and openings:
 

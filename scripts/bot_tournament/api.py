@@ -174,14 +174,6 @@ def get_tournament(auth: AuthSession, tournament_id: str) -> dict[str, Any]:
     return tournament
 
 
-def get_tournament_chat(auth: AuthSession, tournament_id: str) -> list[dict[str, Any]]:
-    data = api_request("GET", auth, f"/api/v1/bot/tournament/{tournament_id}/chat")
-    messages = data.get("messages")
-    if not isinstance(messages, list):
-        raise ApiError("API response did not include data.messages as a list")
-    return [message for message in messages if isinstance(message, dict)]
-
-
 def get_pending_games(auth: AuthSession) -> list[dict[str, Any]]:
     data = api_request("GET", auth, "/api/v1/bot/games/pending")
     games = data.get("games")
@@ -190,13 +182,12 @@ def get_pending_games(auth: AuthSession) -> list[dict[str, Any]]:
     return [game for game in games if isinstance(game, dict)]
 
 
-def post_tournament_chat(auth: AuthSession, tournament_id: str, message: str) -> None:
-    api_request(
-        "POST",
-        auth,
-        f"/api/v1/bot/tournament/{tournament_id}/chat",
-        {"message": message},
-    )
+def get_game_requests(auth: AuthSession) -> list[dict[str, Any]]:
+    data = api_request("GET", auth, "/api/v1/bot/games/requests")
+    requests = data.get("requests")
+    if not isinstance(requests, list):
+        raise ApiError("API response did not include data.requests as a list")
+    return [request for request in requests if isinstance(request, dict)]
 
 
 def start_game(auth: AuthSession, game_id: str) -> dict[str, Any]:

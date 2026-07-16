@@ -11,9 +11,6 @@ from .errors import ConfigError
 
 
 DEFAULT_POLL_SECONDS = 5.0
-DEFAULT_HEARTBEAT_SECONDS = 20.0
-DEFAULT_ONLINE_SECONDS = 45.0
-DEFAULT_OFFER_SECONDS = 30.0
 DEFAULT_POLL_JITTER_SECONDS = 1.5
 
 
@@ -22,9 +19,6 @@ class TournamentConfig:
     url: str
     tournament_id: str
     poll_seconds: float = DEFAULT_POLL_SECONDS
-    heartbeat_seconds: float = DEFAULT_HEARTBEAT_SECONDS
-    online_seconds: float = DEFAULT_ONLINE_SECONDS
-    offer_seconds: float = DEFAULT_OFFER_SECONDS
     poll_jitter_seconds: float = DEFAULT_POLL_JITTER_SECONDS
 
 
@@ -134,16 +128,6 @@ def load_tournament_config(path: str) -> TournamentConfig:
         tournament_id=required_string(config, "tournament_id"),
         poll_seconds=positive_float(
             config.get("poll_seconds", DEFAULT_POLL_SECONDS), "poll_seconds"
-        ),
-        heartbeat_seconds=positive_float(
-            config.get("heartbeat_seconds", DEFAULT_HEARTBEAT_SECONDS),
-            "heartbeat_seconds",
-        ),
-        online_seconds=positive_float(
-            config.get("online_seconds", DEFAULT_ONLINE_SECONDS), "online_seconds"
-        ),
-        offer_seconds=positive_float(
-            config.get("offer_seconds", DEFAULT_OFFER_SECONDS), "offer_seconds"
         ),
         poll_jitter_seconds=positive_float(
             config.get("poll_jitter_seconds", DEFAULT_POLL_JITTER_SECONDS),

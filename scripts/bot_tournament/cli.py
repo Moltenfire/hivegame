@@ -31,7 +31,7 @@ def parse_args() -> argparse.Namespace:
     subparsers.add_parser(
         "run",
         parents=[parent],
-        help="Poll tournament chat and coordinate bot game starts.",
+        help="Coordinate bot tournament game requests and play.",
     )
 
     if len(sys.argv) > 1 and sys.argv[1] not in {"summary", "run", "-h", "--help"}:
