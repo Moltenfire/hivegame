@@ -1,0 +1,21 @@
+{
+  "name": "Bot4",
+  "email": "bot4@bots.local",
+  "password": "bot-password",
+  "logging": {
+    "level": "INFO",
+    "directory": "logs",
+    "app_file": true,
+    "uhp_file": true
+  },
+  "uhp": {
+    "command": "/home/jonathan/projects/uhp/nokamute-trained --evaluator defensive-mobility-black-c42",
+    "options": {
+      "NumThreads": 1
+    },
+    "bestmove": {
+      "mode": "depth",
+      "depth": 5
+    }
+  }
+}

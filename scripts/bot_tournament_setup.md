@@ -1,6 +1,8 @@
 # Bot Tournament Setup
 
 This guide sets up local bot accounts and runs the tournament coordinator.
+For the underlying HTTP API the coordinator talks to (auth, games, moves,
+challenges, tournament chat), see [`bot_api.md`](bot_api.md).
 
 ## 1. Create Bot Accounts
 

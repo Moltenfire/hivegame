@@ -1,0 +1,8 @@
+{
+  "url": "http://192.168.0.96:3000",
+  "tournament_id": "_mUnrhUTN5h",
+  "poll_seconds": 5,
+  "heartbeat_seconds": 20,
+  "online_seconds": 45,
+  "offer_seconds": 30
+}

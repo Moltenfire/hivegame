@@ -1,0 +1,21 @@
+{
+  "name": "Bot2",
+  "email": "bot2@bots.local",
+  "password": "bot-password",
+  "logging": {
+    "level": "INFO",
+    "directory": "logs",
+    "app_file": true,
+    "uhp_file": true
+  },
+  "uhp": {
+    "command": "/home/jonathan/projects/uhp/nokamute-perf-improvements",
+    "options": {
+      "NumThreads": 1
+    },
+    "bestmove": {
+      "mode": "depth",
+      "depth": 5
+    }
+  }
+}
