@@ -1,20 +1,18 @@
 # Bot API
 
 HTTP API for bot accounts to authenticate, discover games, play moves, and
-manage challenges and tournament chat. This documents the endpoints
-themselves. For running the reference tournament coordinator against this
-API, see [`bot_tournament_setup.md`](bot_tournament_setup.md).
+manage challenges.
 
-Route handlers live in `apis/src/api/v1/bot/` (`users.rs`, `tournaments.rs`,
-`games.rs`, `challenges.rs`, `play.rs`) and the token endpoint in
+Route handlers live in `apis/src/api/v1/bot/` (`users.rs`, `games.rs`,
+`challenges.rs`, `play.rs`) and the token endpoint in
 `apis/src/api/v1/auth/get_token_handler.rs`.
 
 Every example below is a real, field-complete response shape taken from the
 Rust response structs (`apis/src/responses/*.rs`, `db_lib::models::Game`,
 `shared_types`, `hive_lib`/`engine`). Values are realistic placeholders;
-collections that are board- or tournament-size-dependent (`moves`, `spawns`,
-`reserve_black`/`reserve_white`, `players`, `standings`) are shown with a
-representative subset rather than every possible entry.
+collections that are board-size-dependent (`moves`, `spawns`,
+`reserve_black`/`reserve_white`) are shown with a representative subset
+rather than every possible entry.
 
 ## Response envelope
 
@@ -84,9 +82,7 @@ gives:
 ```
 
 `sub` is the bot's email, and `exp` is 100 minutes after issuance. The
-account must have `bot = true` in the database (see
-[`bot_tournament_setup.md`](bot_tournament_setup.md) for creating bot
-accounts) or the request is rejected.
+account must have `bot = true` in the database or the request is rejected.
 
 Send the token on every other request:
 
@@ -118,8 +114,8 @@ GET /api/v1/bot/game/{nanoid}
 ```
 
 These return raw game database rows (`db_lib::models::Game`), not the richer
-`GameResponse` shape used elsewhere (see [Challenges](#challenges) and
-[Tournaments](#tournaments) below) — note `history` here is a single
+`GameResponse` shape used elsewhere (see [Challenges](#challenges) below) —
+note `history` here is a single
 semicolon-delimited string, `game_status`/`game_type`/`time_mode`/`speed`/
 `conclusion`/`game_start`/`tournament_game_result` are plain strings rather
 than typed objects, and there are no nested player/move/reserve objects.
@@ -324,7 +320,6 @@ Resign request/response:
 GET    /api/v1/bot/challenges/
 POST   /api/v1/bot/challenges/
 GET    /api/v1/bot/challenge/accept/{nanoid}
-DELETE /api/v1/bot/challenge/{nanoid}
 ```
 
 ### List challenges
@@ -555,25 +550,6 @@ endpoints. A game with moves played looks like:
 `game_control_history` is `Vec<(turn, GameControl)>`; a resign at turn 3
 looks like `[[3, { "Resign": "Black" }]]`.
 
-### Delete/withdraw a challenge
-
-```
-DELETE /api/v1/bot/challenge/{nanoid}
-```
-
-Only the challenger, the addressed opponent, or an admin bot can delete it.
-
-```json
-{
-  "success": true,
-  "data": {
-    "bot": "bot1@bots.local",
-    "bot_username": "Bot1",
-    "challenge_id": "qaTq1dsIi3-i"
-  }
-}
-```
-
 ## User info
 
 ```
@@ -629,157 +605,12 @@ its own profile).
 `Puzzle`); a speed with no games is simply absent from the map (treated as
 rating 0 by clients).
 
-## Tournaments
-
-```
-GET  /api/v1/bot/tournament/{tournament_id}
-GET  /api/v1/bot/tournament/{tournament_id}/chat
-POST /api/v1/bot/tournament/{tournament_id}/chat
-```
-
-`{tournament_id}` accepts either the tournament's UUID or its nanoid. All
-three endpoints require the bot to be either joined to the tournament or one
-of its organizers, or they fail with `data.error`
-(`"Bot is not joined to this tournament and is not an organizer"`).
-
-### Get tournament
-
-`data.tournament` is a full `TournamentResponse`, including `standings`,
-every `games` entry as a full `GameResponse` (see the
-[accept-challenge example](#accept-a-challenge) above for that shape in
-full), and every player as a `UserResponse`. This is how a bot discovers
-which games it's been paired into and reads any assigned-opening text in
-`description`.
-
-```json
-{
-  "success": true,
-  "data": {
-    "tournament": {
-      "id": "6f8e2b3a-1c4d-4e5f-8a9b-0c1d2e3f4a5b",
-      "tournament_id": "LG2xvFdhFvb",
-      "standings": {
-        "players": ["b1d5e2b0-6e0a-4a2b-9c1d-2f6a7e8b9c10", "a3f1c4d2-8b7e-4c1a-9d3e-5f6a7b8c9d11"],
-        "players_scores": {
-          "b1d5e2b0-6e0a-4a2b-9c1d-2f6a7e8b9c10": { "RawPoints": 2.0, "SonnebornBerger": 1.5 },
-          "a3f1c4d2-8b7e-4c1a-9d3e-5f6a7b8c9d11": { "RawPoints": 1.0, "SonnebornBerger": 1.0 }
-        },
-        "pairings": {
-          "b1d5e2b0-6e0a-4a2b-9c1d-2f6a7e8b9c10": [
-            {
-              "white_uuid": "b1d5e2b0-6e0a-4a2b-9c1d-2f6a7e8b9c10",
-              "black_uuid": "a3f1c4d2-8b7e-4c1a-9d3e-5f6a7b8c9d11",
-              "white_elo": 1452.0,
-              "black_elo": 1498.0,
-              "result": { "Winner": "White" }
-            }
-          ]
-        },
-        "tiebreakers": ["RawPoints", "SonnebornBerger"],
-        "players_standings": [
-          ["b1d5e2b0-6e0a-4a2b-9c1d-2f6a7e8b9c10"],
-          ["a3f1c4d2-8b7e-4c1a-9d3e-5f6a7b8c9d11"]
-        ]
-      },
-      "name": "Bot Test Cup",
-      "description": "Round-robin bot tournament.\n\nAssigned openings:\n- wS1;bS1 -wS1",
-      "scoring": "Game",
-      "tiebreakers": ["RawPoints", "SonnebornBerger"],
-      "invitees": [],
-      "players": {
-        "b1d5e2b0-6e0a-4a2b-9c1d-2f6a7e8b9c10": {
-          "username": "Bot1",
-          "uid": "b1d5e2b0-6e0a-4a2b-9c1d-2f6a7e8b9c10",
-          "patreon": false,
-          "bot": true,
-          "admin": false,
-          "deleted": false,
-          "ratings": {},
-          "takeback": "Always",
-          "lang": null
-        }
-      },
-      "organizers": [],
-      "games": [],
-      "seats": 4,
-      "min_seats": 2,
-      "rounds": 3,
-      "round_robin_pairs": 1,
-      "invite_only": false,
-      "mode": "RoundRobin",
-      "time_mode": "RealTime",
-      "time_base": 600,
-      "time_increment": 5,
-      "band_upper": null,
-      "band_lower": null,
-      "status": "InProgress",
-      "start_mode": "Manual",
-      "starts_at": null,
-      "ends_at": null,
-      "started_at": "2026-08-13T13:00:00.000Z",
-      "round_duration": null,
-      "created_at": "2026-08-10T09:00:00.000Z",
-      "updated_at": "2026-08-13T14:05:47.000Z"
-    }
-  }
-}
-```
-
-`games` is truncated to `[]` above purely for length — in practice each
-entry is a complete `GameResponse` object identical in shape to
-`data.game` in the [accept-challenge example](#accept-a-challenge).
-
-### Tournament chat
-
-```
-GET /api/v1/bot/tournament/{tournament_id}/chat
-```
-
-Chat history is in-memory only, not persisted across server restarts.
-
-```json
-{
-  "success": true,
-  "data": {
-    "messages": [
-      {
-        "destination": { "TournamentLobby": "LG2xvFdhFvb" },
-        "message": {
-          "user_id": "b1d5e2b0-6e0a-4a2b-9c1d-2f6a7e8b9c10",
-          "username": "Bot1",
-          "timestamp": "2026-08-13T14:00:10.000Z",
-          "message": "Bot1 ready for round 2",
-          "turn": null
-        }
-      }
-    ]
-  }
-}
-```
-
-```
-POST /api/v1/bot/tournament/{tournament_id}/chat
-```
-
-Request:
-
-```json
-{ "message": "Bot1 ready for round 2" }
-```
-
-Response is `{ "success": true, "data": { "message": <ChatMessageContainer as above> } }`.
-
 ## Typical bot loop
 
 1. `POST /api/v1/auth/token` to get a bearer token; refresh it before it
    expires (it's a JWT — decode `exp` locally rather than guessing).
-2. Poll `GET /api/v1/bot/games/pending` (and/or watch tournament chat/state)
-   to find games needing attention.
+2. Poll `GET /api/v1/bot/games/pending` to find games needing attention.
 3. For a new pairing, both sides call `POST /games/control` with
    `"start"`.
 4. On the bot's turn, compute a move and call `POST /games/play`.
 5. On game end, go back to step 2.
-
-This is exactly what `scripts/bot_tournament/api.py` and
-`scripts/bot_tournament/coordination.py` implement — read those for a
-working reference client.
