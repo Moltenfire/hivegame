@@ -293,17 +293,43 @@ impl AnalysisStore {
     pub fn next_history_target_node_id(&self) -> Option<NodeId> {
         let selected = self.selected_node_id();
         self.0.arena().with(|arena| {
-            arena
+            let mut target = arena
                 .node(selected)
-                .and_then(|node| node.children.first().copied())
+                .and_then(|node| node.children.first().copied())?;
+            // A pass changes whose turn it is but has no visible board action. Match the game
+            // viewer's arrows by stepping through it to the next move when one exists.
+            while arena
+                .node(target)
+                .and_then(|node| node.value.as_ref())
+                .is_some_and(|value| value.piece == "pass")
+            {
+                let Some(next) = arena
+                    .node(target)
+                    .and_then(|node| node.children.first().copied())
+                else {
+                    break;
+                };
+                target = next;
+            }
+            Some(target)
         })
     }
 
     pub fn previous_history_target_node_id(&self) -> Option<NodeId> {
         let selected = self.selected_node_id();
-        self.0
-            .arena()
-            .with(|arena| arena.node(selected).and_then(|node| node.parent))
+        self.0.arena().with(|arena| {
+            let mut target = arena.node(selected).and_then(|node| node.parent)?;
+            // When the current move followed a forced pass, jump back to the preceding visible
+            // move rather than stopping on the unchanged board at the pass node.
+            while arena
+                .node(target)
+                .and_then(|node| node.value.as_ref())
+                .is_some_and(|value| value.piece == "pass")
+            {
+                target = arena.node(target).and_then(|node| node.parent)?;
+            }
+            Some(target)
+        })
     }
 
     pub fn select_main_ply(&self, raw_ply: Option<usize>, game_state: GameStateStore) -> bool {

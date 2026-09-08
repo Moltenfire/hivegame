@@ -75,6 +75,50 @@ fn hash_equivalent_sibling_reuses_the_existing_node() {
 }
 
 #[test]
+fn analysis_history_arrows_skip_forced_passes() {
+    let owner = Owner::new();
+    owner.with(|| {
+        let history = hive_lib::History::from_pgn_str(include_str!(
+            "../../../../engine/test_pgns/valid/pass2.pgn"
+        ))
+        .expect("valid pass history");
+        let pass_index = history
+            .moves
+            .iter()
+            .position(|(piece, _)| piece == "pass")
+            .expect("fixture contains a pass");
+        let selected_count = pass_index;
+        let loaded = LoadedAnalysis::from_moves(
+            history.game_type,
+            &history.moves,
+            &history.hashes,
+            selected_count,
+        )
+        .expect("pass game loads");
+        let game_state = GameStateStore::new();
+        game_state.reset_with_state(loaded.playable);
+        let store = AnalysisStore::new(loaded.state);
+        let before_pass = store.selected_node_id_untracked();
+
+        let after_pass = store
+            .next_history_target_node_id()
+            .expect("a move follows the pass");
+        store.0.arena().with_untracked(|arena| {
+            assert_ne!(
+                arena
+                    .node(after_pass)
+                    .and_then(|node| node.value.as_ref())
+                    .map(|value| value.piece.as_str()),
+                Some("pass")
+            );
+        });
+
+        assert!(store.select_node(after_pass, game_state));
+        assert_eq!(store.previous_history_target_node_id(), Some(before_pass));
+    });
+}
+
+#[test]
 fn exact_child_match_wins_over_an_earlier_hash_match() {
     let mut arena = AnalysisArena::blank();
     let value = MoveDelta {
